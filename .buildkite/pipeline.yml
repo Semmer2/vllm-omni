@@ -31,15 +31,8 @@ steps:
             - "/fsx/hf_cache:/fsx/hf_cache"
   - label: "Large Model Test (H100)"
     depends_on: image-build
-    soft_fail: false
     agents:
       queue: mithril-h100-pool
-    retry:
-      automatic:
-        - exit_status: -1
-          limit: 1
-        - exit_status: -10
-          limit: 1
     commands:
       - pytest -s -v tests/single_stage/test_diffusion_model.py
     plugins:
