@@ -294,7 +294,7 @@ class OmniBase:
         self._stages_ready.add(stage_id)
         logger.info(f"[{self._name}] Stage-{stage_id} reported ready")
 
-    def _wait_for_stages_ready(self, timeout: int = 120) -> None:
+    def _wait_for_stages_ready(self, timeout: int = 3000) -> None:
         """Wait for all stages to report readiness with optimized polling."""
         num_stages = len(self.stage_list)
         deadline = time.time() + max(0, int(timeout))

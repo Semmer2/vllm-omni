@@ -70,6 +70,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--tensor_parallel_size",
+        type=int,
+        default=1,
+        help="Number of GPUs used for tensor parallelism.",
+    )
+    parser.add_argument(
         "--ulysses_degree",
         type=int,
         default=1,
