@@ -3930,9 +3930,6 @@ class ResBlock(nn.Module):
         down (`bool`, *optional*):
             If True, use this block for downsampling.
 
-    Returns:
-        torch.Tensor:
-            The output tensor after applying the residual block.
     """
 
     def __init__(
@@ -3947,7 +3944,7 @@ class ResBlock(nn.Module):
         down=False,
         device=None,
         dtype=None,
-    ):
+    ) -> None:
         factory_kwargs = {"dtype": dtype, "device": device}
         super().__init__()
         self.in_channels = in_channels
