@@ -115,6 +115,7 @@ class OmniModelConfig(ModelConfig):
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
+        print("-------OmniModelConfig--------")
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model, self.served_model_name)
         self.model = maybe_model_redirect(self.model)

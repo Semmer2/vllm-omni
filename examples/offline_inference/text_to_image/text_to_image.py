@@ -70,6 +70,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--tensor_parallel_size",
+        type=int,
+        default=1,
+        help="Number of GPUs used for tensor parallelism.",
+    )
+    parser.add_argument(
         "--ulysses_degree",
         type=int,
         default=1,
@@ -123,7 +129,9 @@ def main():
         }
 
     # assert args.ring_degree == 1, "Ring attention is not supported yet"
-    parallel_config = DiffusionParallelConfig(ulysses_degree=args.ulysses_degree, ring_degree=args.ring_degree)
+    parallel_config = DiffusionParallelConfig(tensor_parallel_size=args.tensor_parallel_size,
+                                              ulysses_degree=args.ulysses_degree,
+                                              ring_degree=args.ring_degree)
     omni = Omni(
         model=args.model,
         vae_use_slicing=vae_use_slicing,

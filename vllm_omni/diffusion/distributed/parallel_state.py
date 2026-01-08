@@ -65,6 +65,7 @@ _CFG: GroupCoordinator | None = None
 _DP: GroupCoordinator | None = None
 _DIT: GroupCoordinator | None = None
 _VAE: GroupCoordinator | None = None
+# _EP: GroupCoordinator | None = None
 
 
 def generate_masked_orthogonal_rank_groups(
@@ -200,6 +201,7 @@ class RankGenerator:
             "pp": self.pp,
             "cfg": self.cfg,
             "dp": self.dp,
+            "ep": self.dp * self.tp
         }
         order = order.lower()
 
@@ -255,6 +257,12 @@ def get_world_group() -> GroupCoordinator:
 def get_sp_group() -> SequenceParallelGroupCoordinator:
     assert _SP is not None, "pipeline model parallel group is not initialized"
     return _SP
+
+
+# EP
+# def get_ep_group() -> GroupCoordinator:
+#     assert vllm_parallel_state._EP is not None, "expert parallel group is not initialized"
+#     return vllm_parallel_state._EP
 
 
 def get_sequence_parallel_world_size():
@@ -459,6 +467,7 @@ def init_model_parallel_group(
         "data",
         "pipeline",
         "tensor",
+        "expert",
         "sequence",
         "classifier_free_guidance",
     ], f"parallel_mode {parallel_mode} is not supported"
@@ -656,7 +665,7 @@ def initialize_model_parallel(
         pipeline_parallel_size,
         cfg_parallel_size,
         data_parallel_size,
-        "tp-sp-pp-cfg-dp",
+        "tp-sp-pp-cfg-dp-ep",
     )
     global _DP
     assert _DP is None, "data parallel group is already initialized"
@@ -666,6 +675,7 @@ def initialize_model_parallel(
         backend=backend,
         parallel_mode="data",
     )
+    vllm_parallel_state._DP = _DP
 
     global _CFG
     assert _CFG is None, "classifier_free_guidance group is already initialized"
@@ -711,6 +721,24 @@ def initialize_model_parallel(
     if vae_parallel_size > 0:
         init_vae_group(dit_parallel_size, vae_parallel_size, backend)
     init_dit_group(dit_parallel_size, backend)
+
+    # global _EP
+    assert vllm_parallel_state._EP is None, "expert parallel group is already initialized"
+    all_ranks = torch.arange(world_size).reshape(
+        -1, data_parallel_size, pipeline_parallel_size, tensor_parallel_size
+    )  # noqa
+    group_ranks = (
+        all_ranks.transpose(1, 2)
+        .reshape(-1, data_parallel_size * tensor_parallel_size)
+        .unbind(0)
+    )
+    group_ranks = [x.tolist() for x in group_ranks]
+    vllm_parallel_state._EP = init_model_parallel_group(
+        group_ranks=group_ranks,
+        local_rank=get_world_group().local_rank,
+        backend=backend,
+        parallel_mode="expert",
+    )
 
 
 def destroy_model_parallel():

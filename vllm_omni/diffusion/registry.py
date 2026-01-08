@@ -69,6 +69,11 @@ _DIFFUSION_MODELS = {
         "pipeline_sd3",
         "StableDiffusion3Pipeline",
     ),
+    "HunyuanImage3ForCausalMM": (
+        "hunyuan",
+        "hunyuan_image_3",
+        "HunyuanImage3Pipeline"
+    ),
 }
 
 
@@ -91,6 +96,7 @@ def initialize_model(
         model = model_class(od_config=od_config)
         # Configure VAE memory optimization settings from config
         if hasattr(model.vae, "use_slicing"):
+            # vae_use_slicing = true?
             model.vae.use_slicing = od_config.vae_use_slicing
         if hasattr(model.vae, "use_tiling"):
             model.vae.use_tiling = od_config.vae_use_tiling

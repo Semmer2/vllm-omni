@@ -56,6 +56,7 @@ class NPUWorker(GPUWorker):
             init_distributed_environment(world_size=world_size, rank=rank)
             logger.info(f"Worker {self.rank}: Initialized device and distributed environment.")
             parallel_config = self.od_config.parallel_config
+            print("NPU worker call ")
             initialize_model_parallel(
                 data_parallel_size=parallel_config.data_parallel_size,
                 cfg_parallel_size=parallel_config.cfg_parallel_size,
