@@ -199,6 +199,7 @@ extend-ignore-identifiers-re = [
     ".*arange",
     ".*MoBA",
     ".*temperal_downsample",
+    ".*_nd",
     ".*nothink.*",
     ".*NOTHINK.*",
     ".*nin.*",

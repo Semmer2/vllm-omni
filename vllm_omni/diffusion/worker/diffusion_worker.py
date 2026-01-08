@@ -13,7 +13,7 @@ from contextlib import AbstractContextManager, nullcontext
 
 import torch
 import zmq
-from vllm.config import VllmConfig, CompilationConfig, set_current_vllm_config
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.logger import init_logger
 from vllm.utils.mem_utils import GiB_bytes
@@ -91,8 +91,10 @@ class DiffusionWorker:
         self.vllm_config = vllm_config
 
         # Initialize distributed environment
-        with (set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config),
-              set_current_vllm_config(self.vllm_config)):
+        with (
+            set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config),
+            set_current_vllm_config(self.vllm_config),
+        ):
             init_distributed_environment(world_size=world_size, rank=rank)
             logger.info(f"Worker {self.rank}: Initialized device and distributed environment.")
 

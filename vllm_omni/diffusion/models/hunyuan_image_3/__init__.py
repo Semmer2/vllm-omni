@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""hunyuan Image 3 diffusion model components."""
+"""Hunyuan Image 3 diffusion model components."""
 
 from vllm_omni.diffusion.models.hunyuan_image_3.hunyuan_image_3_transformer import (
     HunyuanImage3Model,

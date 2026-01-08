@@ -1,7 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import logging
 from collections.abc import Iterable
-from typing import Any, Dict, List, Optional, Tuple, Union  # noqa: UP035
+from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 from diffusers import FlowMatchEulerDiscreteScheduler
@@ -24,6 +28,7 @@ from .hunyuan_image_3_transformer import (
     HunyuanImage3PreTrainedModel,
     HunyuanImage3Text2ImagePipeline,
     ImageInfo,
+    JointImageInfo,
     LightProjector,
     Siglip2VisionTransformer,
     TimestepEmbedder,
@@ -337,9 +342,9 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
     def instantiate_vit_image_tokens(
         self,
         x: torch.Tensor,
-        cond_vit_images: Union[torch.Tensor, List[torch.Tensor]],
+        cond_vit_images: torch.Tensor | list[torch.Tensor],
         cond_vit_image_mask: torch.Tensor,
-        vit_kwargs: Dict[str, Any],
+        vit_kwargs: dict[str, Any],
     ):
         # 1. Forward the vit encoder and vit aligner to get the vit image embeddings and align them to the
         # transformer hidden size
@@ -397,6 +402,81 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             rope_image_info.append(list(zip(image_slices, image_shapes)))
         return rope_image_info
 
+    def vae_encode(self, image, cfg_factor=1):
+        config = self.vae.config
+
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+            vae_encode_result = self.vae.encode(image)
+            if isinstance(vae_encode_result, torch.Tensor):
+                latents = vae_encode_result
+            else:
+                latents = vae_encode_result.latent_dist.sample()
+            if hasattr(config, "shift_factor") and config.shift_factor:
+                latents.sub_(config.shift_factor)
+            if hasattr(config, "scaling_factor") and config.scaling_factor:
+                latents.mul_(config.scaling_factor)
+
+        if hasattr(self.vae, "ffactor_temporal"):
+            assert latents.shape[2] == 1, "latents should have shape [B, C, T, H, W] and T should be 1"
+            latents = latents.squeeze(2)
+
+        # Here we always use t=0 to declare it is a clean conditional image
+        t = torch.zeros((latents.shape[0],))
+
+        if cfg_factor > 1:
+            t = t.repeat(cfg_factor)
+            latents = latents.repeat(cfg_factor, 1, 1, 1)
+
+        return t, latents
+
+    def _encode_cond_image(
+        self,
+        batch_cond_image_info_list: list[list[JointImageInfo]],
+        cfg_factor: int = 1,
+    ):
+        # VAE encode one by one, as we assume cond images have different sizes
+        batch_cond_vae_images, batch_cond_t, batch_cond_vit_images = [], [], []
+        for cond_image_info_list in batch_cond_image_info_list:
+            cond_vae_image_list, cond_t_list, cond_vit_image_list = [], [], []
+            for image_info in cond_image_info_list:
+                cond_t_, cond_vae_image_ = self.vae_encode(
+                    image_info.vae_image_info.image_tensor.to(self.device),
+                )
+                cond_vit_image_list.append(image_info.vision_image_info.image_tensor)
+                cond_vae_image_list.append(cond_vae_image_.squeeze(0))
+                cond_t_list.append(cond_t_)
+            batch_cond_vae_images.append(cond_vae_image_list)
+            batch_cond_t.append(cond_t_list)
+            batch_cond_vit_images.append(torch.cat(cond_vit_image_list, dim=0))
+
+        # If only one cond image for each sample and all have the same size, we can batch them together
+        # In this case, cond_vae_images is a 4-D tensor.
+        if all([len(items) == 1 for items in batch_cond_vae_images]) and all(
+            items[0].shape == batch_cond_vae_images[0][0].shape for items in batch_cond_vae_images
+        ):
+            cond_vae_images = torch.stack([items[0] for items in batch_cond_vae_images], dim=0)
+            cond_t = torch.cat([items[0] for items in batch_cond_t], dim=0)
+            if cfg_factor > 1:
+                cond_t = cond_t.repeat(cfg_factor)
+                cond_vae_images = cond_vae_images.repeat(cfg_factor, 1, 1, 1)
+        else:
+            # In this case, cond_vae_images is a list of 4-D tensors or a list of lists of 3-D tensors.
+            cond_t = [torch.cat(item, dim=0) for item in batch_cond_t]
+            cond_vae_images = []
+            for items in batch_cond_vae_images:
+                if all(items[0].shape == item.shape for item in items):
+                    cond_vae_images.append(torch.stack(items, dim=0))
+                else:
+                    cond_vae_images.append(items)
+            if cfg_factor > 1:
+                cond_t = cond_t * cfg_factor
+                cond_vae_images = cond_vae_images * cfg_factor
+
+        if cfg_factor > 1:
+            batch_cond_vit_images = batch_cond_vit_images * cfg_factor
+
+        return cond_vae_images, cond_t, batch_cond_vit_images
+
     @staticmethod
     def check_inputs(prompt=None, message_list=None):
         if prompt is None and message_list is None:
@@ -426,11 +506,12 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         mode="gen_image",
         system_prompt=None,
         cot_text=None,
+        num_inference_steps=50,
+        guidance_scale=5.0,
         image_size="auto",
         message_list=None,
         device=None,
         max_new_tokens=None,
-        num_inference_steps=50,
         **kwargs,
     ):
         # 1. Sanity check
@@ -582,6 +663,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             custom_pos_emb=(cos, sin),
             mode=mode,
             num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
             image_mask=to_device(output.gen_image_mask, device),
             gen_timestep_scatter_index=to_device(output.gen_timestep_scatter_index, device),
             cond_vae_images=to_device(cond_vae_images, device),
@@ -608,7 +690,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         self,
         inputs_tensor: torch.Tensor,
         generation_config: GenerationConfig,
-        model_kwargs: Dict[str, Any],
+        model_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         # create `4d` bool attention mask (b, 1, seqlen, seqlen) using this implementation to bypass the 2d requirement
         # in the `transformers.generation_utils.GenerationMixin.generate`.
@@ -674,10 +756,10 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
     def _update_model_kwargs_for_generation(
         self,
         outputs: ModelOutput,
-        model_kwargs: Dict[str, Any],
+        model_kwargs: dict[str, Any],
         is_encoder_decoder: bool = False,
         num_new_tokens: int = 1,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         mode = model_kwargs["mode"]
 
         updated_model_kwargs = {
@@ -737,7 +819,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
 
     def _generate(
         self,
-        generator: Optional[List[torch.Generator]] = None,
+        generator: list[torch.Generator] | None = None,
         **kwargs,
     ):
         mode = kwargs.get("mode", "gen_text")
@@ -746,7 +828,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             raise NotImplementedError("Not support gen text for hunyuan image")
 
         elif mode == "gen_image":
-            batch_gen_image_info: List[ImageInfo] = kwargs.get("batch_gen_image_info")
+            batch_gen_image_info: list[ImageInfo] = kwargs.get("batch_gen_image_info")
             if batch_gen_image_info is None:
                 raise ValueError("`batch_gen_image_info` should be provided when `mode` is `gen_image`.")
 
@@ -765,7 +847,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
                     batch_size=len(batch_gen_image_info),
                     image_size=[batch_gen_image_info[0].image_height, batch_gen_image_info[0].image_width],
                     num_inference_steps=kwargs.get("num_inference_steps", 50),
-                    guidance_scale=kwargs.get("diff_guidance_scale", 5.0),
+                    guidance_scale=kwargs.get("guidance_scale", 5.0),
                     generator=generator,
                     model_kwargs=kwargs,
                 )
@@ -783,34 +865,34 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
 
     def forward_call(
         self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        custom_pos_emb: Optional[Tuple[torch.FloatTensor]] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        custom_pos_emb: tuple[torch.FloatTensor] | None = None,
         mode: str = "gen_text",
-        first_step: Optional[bool] = None,
+        first_step: bool | None = None,
         # for gen image
-        images: Optional[BatchRaggedImages] = None,
-        image_mask: Optional[torch.Tensor] = None,
-        timestep: Optional[BatchRaggedTensor] = None,
-        gen_timestep_scatter_index: Optional[torch.Tensor] = None,
+        images: BatchRaggedImages | None = None,
+        image_mask: torch.Tensor | None = None,
+        timestep: BatchRaggedTensor | None = None,
+        gen_timestep_scatter_index: torch.Tensor | None = None,
         # for cond image
-        cond_vae_images: Optional[BatchRaggedImages] = None,
-        cond_timestep: Optional[BatchRaggedTensor] = None,
-        cond_vae_image_mask: Optional[torch.Tensor] = None,
-        cond_vit_images: Optional[BatchRaggedImages] = None,
-        cond_vit_image_mask: Optional[torch.Tensor] = None,
-        vit_kwargs: Optional[Dict[str, Any]] = None,
-        cond_timestep_scatter_index: Optional[torch.Tensor] = None,
-        query_lens: Optional[list[int]] = None,
-        seq_lens: Optional[list[int]] = None,
-        num_image_tokens: Optional[int] = None,
-    ) -> Union[Tuple, CausalMMOutputWithPast]:
+        cond_vae_images: BatchRaggedImages | None = None,
+        cond_timestep: BatchRaggedTensor | None = None,
+        cond_vae_image_mask: torch.Tensor | None = None,
+        cond_vit_images: BatchRaggedImages | None = None,
+        cond_vit_image_mask: torch.Tensor | None = None,
+        vit_kwargs: dict[str, Any] | None = None,
+        cond_timestep_scatter_index: torch.Tensor | None = None,
+        query_lens: list[int] | None = None,
+        seq_lens: list[int] | None = None,
+        num_image_tokens: int | None = None,
+    ) -> tuple | CausalMMOutputWithPast:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         # Sanity Check of Inputs
         self._check_inputs(
@@ -938,30 +1020,34 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         req: OmniDiffusionRequest,
         prompt: str | list[str] = "",
         image_size="auto",
-        height: int | None = None,
-        width: int | None = None,
+        height: int = 1024,
+        width: int = 1024,
         num_inference_steps: int = 50,
-        guidance_scale: float = 1.0,
+        guidance_scale: float = 5.0,
         system_prompt: str | None = None,
         generator: torch.Generator | list[torch.Generator] | None = None,
         **kwargs,
     ) -> DiffusionOutput:
         prompt = [p if isinstance(p, str) else (p.get("prompt") or "") for p in req.prompts] or prompt
         generator = req.sampling_params.generator or generator
-        height = req.sampling_params.height or height or self.default_sample_size * self.vae_scale_factor
-        width = req.sampling_params.width or width or self.default_sample_size * self.vae_scale_factor
-        image_size = (height, width)
+        height = req.sampling_params.height or height
+        width = req.sampling_params.width or width
         num_inference_steps = req.sampling_params.num_inference_steps or num_inference_steps
         if req.sampling_params.guidance_scale_provided:
             guidance_scale = req.sampling_params.guidance_scale
+        if guidance_scale <= 1.0:
+            logger.warning("HunyuanImage3.0 does not support guidance_scale <= 1.0, will set it to 1.0 + epsilon.")
+            guidance_scale = 1.0 + np.finfo(float).eps
+        image_size = (height, width)
         model_inputs = self.prepare_model_inputs(
             prompt=prompt,
             cot_text=None,
             system_prompt=system_prompt,
             mode="gen_image",
             generator=generator,
-            num_inference_steps=num_inference_steps,
             image_size=image_size,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
         )
         outputs = self._generate(**model_inputs, **kwargs)
         return DiffusionOutput(output=outputs[0])

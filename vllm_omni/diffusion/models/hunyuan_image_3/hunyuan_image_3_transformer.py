@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import glob
 import inspect
 import logging
@@ -9,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union, cast  # noqa: UP035
+from typing import Any, cast
 
 import numpy as np
 import regex as re
@@ -91,12 +94,12 @@ def _get_cla_factor(config: PretrainedConfig) -> int:
 
 def retrieve_timesteps(
     scheduler,
-    num_inference_steps: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    timesteps: Optional[List[int]] = None,
-    sigmas: Optional[List[float]] = None,
+    num_inference_steps: int | None = None,
+    device: str | torch.device | None = None,
+    timesteps: list[int] | None = None,
+    sigmas: list[float] | None = None,
     **kwargs,
-):
+) -> tuple[list[int], int]:
     """
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
     custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
@@ -155,7 +158,7 @@ def real_batched_index_select(t, dim, idx):
     return torch.stack([torch.index_select(t[i], dim - 1, idx[i]) for i in range(len(t))])
 
 
-def conv_nd(dims, *args, **kwargs):
+def conv_nd(dims, *args, **kwargs):  # noqa: N802
     """
     Create a 1D, 2D, or 3D convolution module.
     """
@@ -202,7 +205,7 @@ def _to_tuple(x, dim=2):
         raise ValueError(f"Expected length {dim} or int, but got {x}")
 
 
-def get_meshgrid_nd(start, *args, dim=2):
+def get_meshgrid_nd(start, *args, dim=2):  # noqa: N802
     if len(args) == 0:
         # start is grid_size
         num = _to_tuple(start, dim=dim)
@@ -240,8 +243,8 @@ def get_meshgrid_nd(start, *args, dim=2):
 def build_2d_rope(
     seq_len: int,
     n_elem: int,
-    image_infos: Optional[List[Tuple[slice, Tuple[int, int]]]] = None,
-    device: Optional[torch.device] = None,
+    image_infos: list[tuple[slice, tuple[int, int]]] | None = None,
+    device: torch.device | None = None,
     base: int = 10000,
     base_rescale_factor: float = 1.0,
     return_all_pos: bool = False,
@@ -284,7 +287,7 @@ def build_2d_rope(
             # current image
             beta_y = L + (w * h - h) / 2
             beta_x = L + (w * h - w) / 2
-            grid = get_meshgrid_nd((beta_y, beta_x), (beta_y + h, beta_x + w))  # [2, h, w]
+            grid = get_meshgrid_nd((beta_y, beta_x), (beta_y + h, beta_x + w))  # [2, h, w] # noqa: N802
             grid = grid.reshape(2, -1)  # (y, x)
             y_sections.append(grid[0])
             x_sections.append(grid[1])
@@ -316,8 +319,8 @@ def build_2d_rope(
 def build_batch_2d_rope(
     seq_len: int,
     n_elem: int,
-    image_infos: Optional[List[List[Tuple[slice, Tuple[int, int]]]]] = None,
-    device: Optional[torch.device] = None,
+    image_infos: list[list[tuple[slice, tuple[int, int]]]] | None = None,
+    device: torch.device | None = None,
     base: int = 10000,
     base_rescale_factor: float = 1.0,
     return_all_pos: bool = False,
@@ -372,7 +375,9 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla=False):
+def apply_rotary_pos_emb(
+    q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla=False
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Applies Rotary Position Embedding to the query and key tensors.
 
@@ -435,7 +440,7 @@ def default(value, default_value):
     return value if value is not None else default_value
 
 
-class Resolution(object):
+class Resolution:
     def __init__(self, size, *args):
         if isinstance(size, str):
             if "x" in size:
@@ -464,7 +469,7 @@ class Resolution(object):
         return f"{self.h}x{self.w}"
 
 
-class ResolutionGroup(object):
+class ResolutionGroup:
     def __init__(self, base_size=None, step=None, align=1):
         self.align = align
         self.base_size = base_size
@@ -645,7 +650,7 @@ class ImageTensor(torch.Tensor):
     vision_encoder_kwargs: dict
 
 
-class JointImageInfo(object):
+class JointImageInfo:
     def __init__(self, vae_image_info: ImageInfo, vision_image_info: ImageInfo, vision_encoder_kwargs: dict = None):
         self.vae_image_info = vae_image_info
         self.vision_image_info = vision_image_info
@@ -705,7 +710,7 @@ class JointImageInfo(object):
         self.vision_image_info.zeros_()
 
 
-class JointImage(object):
+class JointImage:
     def __init__(self, vae_image: ImageTensor, vision_image: ImageTensor):
         self.vae_image = vae_image
         self.vision_image = vision_image
@@ -713,30 +718,30 @@ class JointImage(object):
 
 
 class TokenizerEncodeOutput(BaseOutput):
-    tokens: torch.Tensor = None
-    timestep_scatter_index: Optional[torch.Tensor] = None
-    guidance_scatter_index: Optional[torch.Tensor] = None
-    text_slices: Optional[List[slice]] = None
-    gen_image_slices: Optional[List[slice]] = None
-    joint_image_slices: Optional[List[slice]] = None
-    cond_vae_image_slices: Optional[List[slice]] = None
-    cond_vit_image_slices: Optional[List[slice]] = None
-    text_mask: Optional[torch.Tensor] = None
-    gen_image_mask: Optional[torch.Tensor] = None
-    cond_vae_image_mask: Optional[torch.Tensor] = None
-    cond_vit_image_mask: Optional[torch.Tensor] = None
-    real_pos: Optional[torch.Tensor] = None
-    all_image_slices: Optional[List[slice]] = None
-    cond_timestep_scatter_index: Optional[torch.Tensor] = None
-    gen_timestep_scatter_index: Optional[torch.Tensor] = None
+    tokens: torch.Tensor | None = None
+    timestep_scatter_index: torch.Tensor | None = None
+    guidance_scatter_index: torch.Tensor | None = None
+    text_slices: list[slice] | None = None
+    gen_image_slices: list[slice] | None = None
+    joint_image_slices: list[slice] | None = None
+    cond_vae_image_slices: list[slice] | None = None
+    cond_vit_image_slices: list[slice] | None = None
+    text_mask: torch.Tensor | None = None
+    gen_image_mask: torch.Tensor | None = None
+    cond_vae_image_mask: torch.Tensor | None = None
+    cond_vit_image_mask: torch.Tensor | None = None
+    real_pos: torch.Tensor | None = None
+    all_image_slices: list[slice] | None = None
+    cond_timestep_scatter_index: torch.Tensor | None = None
+    gen_timestep_scatter_index: torch.Tensor | None = None
 
 
 class Conversation:
-    roles: List[str] = ["User", "Assistant"]
+    roles: list[str] = ["User", "Assistant"]
     sep: str = "\n\n"
 
 
-class TokenizerWrapper(object):
+class TokenizerWrapper:
     def __init__(self, tokenizer):
         if isinstance(tokenizer, str):
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
@@ -777,12 +782,12 @@ class TokenizerWrapper(object):
     def encode_text(
         self,
         *texts,
-        uncond_enabled: Optional[Union[bool, List[bool]]] = None,
-        uncond_p: Optional[float] = None,
-        max_length: Optional[int] = None,
-        pad: Optional[str] = None,
+        uncond_enabled: bool | list[bool] | None = None,
+        uncond_p: float | None = None,
+        max_length: int | None = None,
+        pad: str | None = None,
         return_lengths: bool = False,
-    ):
+    ) -> list[torch.Tensor]:
         r"""
         Encode text and image for AR-like model training of the text-to-image/instruction tuning tasks.
         Support encode multiple texts at once. Each text can be separately conditioned or unconditioned
@@ -917,7 +922,7 @@ class TokenizerWrapper(object):
     def encode_sequence(
         self,
         template: str,
-        token_source: Dict[str, List],
+        token_source: dict[str, list],
         total_length=None,
         add_timestep_token=False,
         add_guidance_token=False,
@@ -926,9 +931,9 @@ class TokenizerWrapper(object):
         use_front_boi_token=True,
         add_pad=True,
         add_bos=True,
-        drop_last: Union[str, bool] = "auto",
+        drop_last: str | bool = "auto",
         add_image_shape_token=False,
-    ):
+    ) -> tuple[list, dict[str, list]]:
         r"""
         Encode a sequence based on the template (e.g., `text-image` for t2i, `text-image-image` for instruction tuning)
         and token source.
@@ -1161,8 +1166,8 @@ class TokenizerWrapper(object):
         self,
         infer_fn,
         prompt_list: list,
-        negative_prompt_list: list = None,
-        infer_fn_kwargs_list: List[Dict[str, int]] = None,
+        negative_prompt_list: list | None = None,
+        infer_fn_kwargs_list: list[dict[str, int]] | None = None,
         do_classifier_free_guidance=False,
         condition_repeat_times: int = 1,
         uncondition_repeat_times: int = 1,
@@ -1329,14 +1334,14 @@ class TokenizerWrapper(object):
 
     def encode_general(
         self,
-        sections: Optional[List[Dict[str, Any]]] = None,
-        max_token_length: Optional[int] = None,
+        sections: list[dict[str, Any]] | None = None,
+        max_token_length: int | None = None,
         add_eos="auto",
         use_text_mask=True,
         add_pad="auto",
         add_bos=True,
         drop_last="auto",
-    ):
+    ) -> TokenizerEncodeOutput:
         r"""
         General encode function to encode a sequence with multiple sections of text and images.
         Each section is a dict with a `type` key and other keys depending on the type.
@@ -1730,7 +1735,7 @@ class TokenizerWrapper(object):
                     sections = sections[:-1]
             else:
                 _bot_prefix = bot_prefix
-            # We can add special tokens for the bot lastest message according to different tasks
+            # We can add special tokens for the bot latest message according to different tasks
             bot_response_prefix = dict(
                 auto=_bot_prefix,
                 image="",
@@ -1758,21 +1763,21 @@ class TokenizerWrapper(object):
 
     def apply_chat_template(
         self,
-        batch_prompt: Optional[List[str]] = None,
-        batch_message_list: Optional[List[List[Dict[str, Any]]]] = None,
+        batch_prompt: list[str] | None = None,
+        batch_message_list: list[list[dict[str, Any]]] | None = None,
         mode: str = "gen_text",
-        batch_gen_image_info: Optional[List[ImageInfo]] = None,
-        batch_cond_image_info: Optional[Union[List[JointImageInfo], List[List[JointImageInfo]]]] = None,
-        batch_system_prompt: Optional[List[str]] = None,
-        batch_cot_text: Optional[List[str]] = None,
-        max_length: Optional[int] = None,
+        batch_gen_image_info: list[ImageInfo] | None = None,
+        batch_cond_image_info: list[JointImageInfo] | list[list[JointImageInfo]] | None = None,
+        batch_system_prompt: list[str] | None = None,
+        batch_cot_text: list[str] | None = None,
+        max_length: int | None = None,
         bot_task: str = "auto",  # auto/image/think/recaption/img_ratio
         image_base_size: int = 1024,
         sequence_template: str = "pretrain",
         cfg_factor: int = 1,
-        add_assistant_prefix: Optional[bool] = None,
+        add_assistant_prefix: bool | None = None,
         drop_think: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         assert bot_task in ["image", "auto", "think", "recaption", "img_ratio"], (
             f"bot_task should be one of ['image', 'auto', 'think', 'recaption', 'img_ratio'], but got {bot_task}."
         )
@@ -1953,7 +1958,7 @@ class Siglip2VisionEmbeddings(nn.Module):
         return embeddings
 
 
-class Config(object):
+class Config:
     def __init__(self, config):
         if config is not None:
             for key, value in config.items():
@@ -2011,7 +2016,7 @@ class Siglip2Encoder(nn.Module):
         config: Siglip2Config
     """
 
-    def __init__(self, config):
+    def __init__(self, config: Any):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([Siglip2EncoderLayer(config) for _ in range(config.num_hidden_layers)])
@@ -2306,7 +2311,7 @@ class ImageKVCacheManager:
 
 @dataclass
 class CausalMMOutputWithPast(CausalLMOutputWithPast):
-    diffusion_prediction: Optional[torch.Tensor] = None
+    diffusion_prediction: torch.Tensor | None = None
 
 
 class HunyuanImage3Config(PretrainedConfig):
@@ -2406,7 +2411,7 @@ class HunyuanImage3Config(PretrainedConfig):
         vocab_size=290943,
         hidden_size=4096,
         intermediate_size: int = 11008,
-        moe_intermediate_size: Union[int, List] = None,
+        moe_intermediate_size: int | list = None,
         num_hidden_layers=32,
         num_attention_heads=32,
         num_key_value_heads=None,
@@ -2441,11 +2446,11 @@ class HunyuanImage3Config(PretrainedConfig):
         use_cla=False,
         cla_share_factor=1,
         norm_type="hf_rms",
-        num_experts: Union[int, List] = 1,
+        num_experts: int | list = 1,
         use_mixed_mlp_moe=False,
-        num_shared_expert: Union[int, List] = 1,
-        moe_topk: Union[int, List] = 1,
-        capacity_factor: int = 1.0,
+        num_shared_expert: int | list = 1,
+        moe_topk: int | list = 1,
+        capacity_factor: float | list = 1.0,
         moe_drop_tokens=False,
         moe_random_routing_dropped_token=False,
         use_mla=False,
@@ -2575,7 +2580,7 @@ class HunyuanImage3Config(PretrainedConfig):
         )
 
 
-class HunyuanImage3ImageProcessor(object):
+class HunyuanImage3ImageProcessor:
     def __init__(self, config):
         self.config = config
 
@@ -2881,7 +2886,7 @@ class HunYuanAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        past_key_value: Optional[Cache] = kwargs.get("past_key_value", None)
+        past_key_value: Cache | None = kwargs.get("past_key_value", None)
         if past_key_value is not None:
             position_ids = kwargs.get("position_ids")
             key_states = k.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -2992,14 +2997,14 @@ class HunyuanImage3DecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: Optional[bool] = False,
-        use_cache: Optional[bool] = False,
-        custom_pos_emb: Optional[Tuple[torch.FloatTensor]] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_value: tuple[torch.Tensor] | None = None,
+        output_attentions: bool | None = False,
+        use_cache: bool | None = False,
+        custom_pos_emb: tuple[torch.FloatTensor] | None = None,
         **kwargs,
-    ) -> Tuple[torch.FloatTensor | Any]:
+    ) -> tuple[torch.FloatTensor | Any]:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -3147,11 +3152,11 @@ class HunyuanImage3Model(nn.Module):
                 num_experts=self.config.num_experts,
                 num_redundant_experts=self.num_redundant_experts,
             )
-            expert_weights_remaping = {
+            expert_weights_remapping = {
                 "gate_proj": ("gate_and_up_proj", 1, 2),
                 "up_proj": ("gate_and_up_proj", 0, 2),
             }
-            return fused_moe_expert_mapping, expert_weights_remaping
+            return fused_moe_expert_mapping, expert_weights_remapping
         else:
             return [], {}
 
@@ -3227,8 +3232,6 @@ class HunyuanImage3Model(nn.Module):
                 continue
             if self.quant_config is not None and (scale_name := self.quant_config.get_cache_scale(name)):
                 # Loading kv cache scales for compressed-tensors quantization
-                if scale_name not in params_dict.keys():
-                    continue
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 loaded_weight = loaded_weight[0]
@@ -3253,8 +3256,6 @@ class HunyuanImage3Model(nn.Module):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict.keys():
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -3286,8 +3287,6 @@ class HunyuanImage3Model(nn.Module):
 
                 assert loaded_weight.shape[0] % den == 0
                 units = loaded_weight.shape[0] // den
-                if name not in params_dict.keys():
-                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 offset = 0
@@ -3325,8 +3324,6 @@ class HunyuanImage3Model(nn.Module):
                     name_mapped = name.replace(weight_name, param_name)
                     found_num += 1
                     if is_pp_missing_parameter(name_mapped, self):
-                        continue
-                    if name not in params_dict.keys():
                         continue
                     param = params_dict[name_mapped]
                     weight_loader = cast(Callable[..., bool], param.weight_loader)
@@ -3367,8 +3364,6 @@ class HunyuanImage3Model(nn.Module):
                     name = "norm.weight"
                 if name == "wte.weight":
                     name = "embed_tokens.weight"
-                if name not in params_dict.keys():
-                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -3378,22 +3373,22 @@ class HunyuanImage3Model(nn.Module):
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        custom_pos_emb: Optional[Tuple[torch.FloatTensor]] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: list[torch.FloatTensor] | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        custom_pos_emb: tuple[torch.FloatTensor] | None = None,
         mode: str = "gen_text",
-        first_step: Optional[bool] = None,
-        query_lens: Optional[list[int]] = None,
-        seq_lens: Optional[list[int]] = None,
-        num_image_tokens: Optional[int] = None,
-        gen_timestep_scatter_index: Optional[torch.Tensor] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        first_step: bool | None = None,
+        query_lens: list[int] | None = None,
+        seq_lens: list[int] | None = None,
+        num_image_tokens: int | None = None,
+        gen_timestep_scatter_index: torch.Tensor | None = None,
+    ) -> tuple | BaseModelOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -3472,7 +3467,7 @@ class ClassifierFreeGuidance:
     def __call__(
         self,
         pred_cond: torch.Tensor,
-        pred_uncond: Optional[torch.Tensor],
+        pred_uncond: torch.Tensor | None,
         guidance_scale: float,
         step: int,
     ) -> torch.Tensor:
@@ -3485,7 +3480,7 @@ class ClassifierFreeGuidance:
 
 @dataclass
 class HunyuanImage3Text2ImagePipelineOutput(BaseOutput):
-    samples: Union[List[Any], np.ndarray]
+    samples: list[Any] | np.ndarray
 
 
 class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
@@ -3513,7 +3508,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
         model,
         scheduler: SchedulerMixin,
         vae,
-        progress_bar_config: Dict[str, Any] | None = None,
+        progress_bar_config: dict[str, Any] | None = None,
     ):
         super().__init__()
 
@@ -3537,7 +3532,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
         self.cfg_operator = ClassifierFreeGuidance()
 
     @staticmethod
-    def denormalize(images: Union[np.ndarray, torch.Tensor]) -> Union[np.ndarray, torch.Tensor]:
+    def denormalize(images: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
         """
         Denormalize an image array to [0,1].
         """
@@ -3587,7 +3582,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
             latent_scale_factor = (self.latent_scale_factor,) * len(image_size)
         elif isinstance(self.latent_scale_factor, tuple) or isinstance(self.latent_scale_factor, list):
             assert len(self.latent_scale_factor) == len(image_size), (
-                "len(latent_scale_factor) shoudl be the same as len(image_size)"
+                "len(latent_scale_factor) should be the same as len(image_size)"
             )
             latent_scale_factor = self.latent_scale_factor
         else:
@@ -3645,21 +3640,22 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
     def __call__(
         self,
         batch_size: int,
-        image_size: List[int],
+        image_size: list[int],
         num_inference_steps: int = 50,
-        timesteps: List[int] | None = None,
-        sigmas: List[float] | None = None,
-        guidance_scale: float = 7.5,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.Tensor] = None,
-        output_type: Optional[str] = "pil",
+        timesteps: list[int] | None = None,
+        sigmas: list[float] | None = None,
+        guidance_scale: float = 5.0,
+        generator: torch.Generator | list[torch.Generator] | None = None,
+        latents: torch.Tensor | None = None,
+        output_type: str | None = "pil",
         return_dict: bool = True,
         guidance_rescale: float = 0.0,
-        callback_on_step_end: Optional[
-            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
-        ] = None,
-        callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        model_kwargs: Dict[str, Any] | None = None,
+        callback_on_step_end: Callable[[int, int, dict], None]
+        | PipelineCallback
+        | MultiPipelineCallbacks
+        | None = None,
+        callback_on_step_end_tensor_inputs: list[str] = ["latents"],
+        model_kwargs: dict[str, Any] | None = None,
         **kwargs,
     ):
         r"""
@@ -3935,7 +3931,7 @@ class ResBlock(nn.Module):
             If True, use this block for downsampling.
 
     Returns:
-        `torch.Tensor`:
+        torch.Tensor:
             The output tensor after applying the residual block.
     """
 
@@ -3962,7 +3958,7 @@ class ResBlock(nn.Module):
         self.in_layers = nn.Sequential(
             normalization(self.in_channels, **factory_kwargs),
             nn.SiLU(),
-            conv_nd(dims, self.in_channels, self.out_channels, 3, padding=1, **factory_kwargs),
+            conv_nd(dims, self.in_channels, self.out_channels, 3, padding=1, **factory_kwargs),  # noqa: N802
         )
 
         self.updown = up or down
@@ -3974,17 +3970,17 @@ class ResBlock(nn.Module):
             normalization(self.out_channels, **factory_kwargs),
             nn.SiLU(),
             nn.Dropout(p=dropout),
-            zero_module(conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1, **factory_kwargs)),
+            zero_module(conv_nd(dims, self.out_channels, self.out_channels, 3, padding=1, **factory_kwargs)),  # noqa: N802
         )
 
         if self.out_channels == self.in_channels:
             self.skip_connection = nn.Identity()
         elif use_conv:
-            self.skip_connection = conv_nd(dims, self.in_channels, self.out_channels, 3, padding=1, **factory_kwargs)
+            self.skip_connection = conv_nd(dims, self.in_channels, self.out_channels, 3, padding=1, **factory_kwargs)  # noqa: N802
         else:
-            self.skip_connection = conv_nd(dims, self.in_channels, self.out_channels, 1, **factory_kwargs)
+            self.skip_connection = conv_nd(dims, self.in_channels, self.out_channels, 1, **factory_kwargs)  # noqa: N802
 
-    def forward(self, x, emb):
+    def forward(self, x, emb) -> torch.Tensor:
         if self.updown:
             in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
             h = in_rest(x)
@@ -4021,7 +4017,7 @@ class UNetDown(nn.Module):
             [
                 conv_nd(
                     2, in_channels=in_channels, out_channels=hidden_channels, kernel_size=3, padding=1, **factory_kwargs
-                )
+                )  # noqa: N802
             ]
         )
 
@@ -4116,7 +4112,7 @@ class UNetUp(nn.Module):
                         kernel_size=3,
                         padding=1,
                         **factory_kwargs,
-                    ),
+                    ),  # noqa: N802
                 )
             )
         else:
@@ -4128,7 +4124,7 @@ class UNetUp(nn.Module):
                     kernel_size=3,
                     padding=1,
                     **factory_kwargs,
-                )
+                )  # noqa: N802
             )
 
     # batch_size, seq_len, model_dim

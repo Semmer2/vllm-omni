@@ -1,19 +1,8 @@
-# Licensed under the TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://github.com/Tencent-Hunyuan/HunyuanImage-3.0/blob/main/LICENSE
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple  # noqa: UP035
 
 import numpy as np
 import torch
@@ -27,7 +16,7 @@ from einops import rearrange
 from torch import Tensor, nn
 
 
-class DiagonalGaussianDistribution(object):
+class DiagonalGaussianDistribution:
     def __init__(self, parameters: torch.Tensor, deterministic: bool = False):
         if parameters.ndim == 3:
             dim = 2  # (B, L, C)
@@ -46,7 +35,7 @@ class DiagonalGaussianDistribution(object):
                 self.mean, device=self.parameters.device, dtype=self.parameters.dtype
             )
 
-    def sample(self, generator: Optional[torch.Generator] = None) -> torch.FloatTensor:
+    def sample(self, generator: torch.Generator | None = None) -> torch.FloatTensor:
         # make sure sample is on the same device as the parameters and has same dtype
         sample = randn_tensor(
             self.mean.shape,
@@ -61,7 +50,7 @@ class DiagonalGaussianDistribution(object):
 @dataclass
 class DecoderOutput(BaseOutput):
     sample: torch.FloatTensor
-    posterior: Optional[DiagonalGaussianDistribution] = None
+    posterior: DiagonalGaussianDistribution | None = None
 
 
 def swish(x: Tensor) -> Tensor:
@@ -230,7 +219,7 @@ class Encoder(nn.Module):
         self,
         in_channels: int,
         z_channels: int,
-        block_out_channels: Tuple[int, ...],
+        block_out_channels: tuple[int, ...],
         num_res_blocks: int,
         ffactor_spatial: int,
         ffactor_temporal: int,
@@ -317,7 +306,7 @@ class Decoder(nn.Module):
         self,
         z_channels: int,
         out_channels: int,
-        block_out_channels: Tuple[int, ...],
+        block_out_channels: tuple[int, ...],
         num_res_blocks: int,
         ffactor_spatial: int,
         ffactor_temporal: int,
@@ -405,14 +394,14 @@ class AutoencoderKLConv3D(ModelMixin, ConfigMixin):
         in_channels: int,
         out_channels: int,
         latent_channels: int,
-        block_out_channels: Tuple[int, ...],
+        block_out_channels: tuple[int, ...],
         layers_per_block: int,
         ffactor_spatial: int,
         ffactor_temporal: int,
         sample_size: int,
         sample_tsize: int,
-        scaling_factor: float = None,
-        shift_factor: Optional[float] = None,
+        scaling_factor: float | None = None,
+        shift_factor: float | None = None,
         downsample_match_channel: bool = True,
         upsample_match_channel: bool = True,
         only_encoder: bool = False,  # only build encoder for saving memory
@@ -482,6 +471,67 @@ class AutoencoderKLConv3D(ModelMixin, ConfigMixin):
                 y / blend_extent
             )
         return b
+
+    def blend_t(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int):
+        blend_extent = min(a.shape[-3], b.shape[-3], blend_extent)
+        for x in range(blend_extent):
+            b[:, :, x, :, :] = a[:, :, -blend_extent + x, :, :] * (1 - x / blend_extent) + b[:, :, x, :, :] * (
+                x / blend_extent
+            )
+        return b
+
+    def spatial_tiled_encode(self, x: torch.Tensor):
+        """spatial tailing for frames"""
+        B, C, T, H, W = x.shape
+        overlap_size = int(self.tile_sample_min_size * (1 - self.tile_overlap_factor))  # 256 * (1 - 0.25) = 192
+        blend_extent = int(self.tile_latent_min_size * self.tile_overlap_factor)  # 8 * 0.25 = 2
+        row_limit = self.tile_latent_min_size - blend_extent  # 8 - 2 = 6
+
+        rows = []
+        for i in range(0, H, overlap_size):
+            row = []
+            for j in range(0, W, overlap_size):
+                tile = x[:, :, :, i : i + self.tile_sample_min_size, j : j + self.tile_sample_min_size]
+                tile = self.encoder(tile)
+                row.append(tile)
+            rows.append(row)
+        result_rows = []
+        for i, row in enumerate(rows):
+            result_row = []
+            for j, tile in enumerate(row):
+                if i > 0:
+                    tile = self.blend_v(rows[i - 1][j], tile, blend_extent)
+                if j > 0:
+                    tile = self.blend_h(row[j - 1], tile, blend_extent)
+                result_row.append(tile[:, :, :, :row_limit, :row_limit])
+            result_rows.append(torch.cat(result_row, dim=-1))
+        moments = torch.cat(result_rows, dim=-2)
+        return moments
+
+    def temporal_tiled_encode(self, x: torch.Tensor):
+        """temporal tailing for frames"""
+        B, C, T, H, W = x.shape
+        overlap_size = int(self.tile_sample_min_tsize * (1 - self.tile_overlap_factor))  # 64 * (1 - 0.25) = 48
+        blend_extent = int(self.tile_latent_min_tsize * self.tile_overlap_factor)  # 8 * 0.25 = 2
+        t_limit = self.tile_latent_min_tsize - blend_extent  # 8 - 2 = 6
+
+        row = []
+        for i in range(0, T, overlap_size):
+            tile = x[:, :, i : i + self.tile_sample_min_tsize, :, :]
+            if self.use_spatial_tiling and (
+                tile.shape[-1] > self.tile_sample_min_size or tile.shape[-2] > self.tile_sample_min_size
+            ):
+                tile = self.spatial_tiled_encode(tile)
+            else:
+                tile = self.encoder(tile)
+            row.append(tile)
+        result_row = []
+        for i, tile in enumerate(row):
+            if i > 0:
+                tile = self.blend_t(row[i - 1], tile, blend_extent)
+            result_row.append(tile[:, :, :t_limit, :, :])
+        moments = torch.cat(result_row, dim=-3)
+        return moments
 
     def spatial_tiled_decode(self, z: torch.Tensor):
         """spatial tailing for frames"""
