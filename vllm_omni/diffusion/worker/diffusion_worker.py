@@ -86,11 +86,11 @@ class DiffusionWorker:
 
         # Create vllm_config for parallel configuration
         vllm_config = VllmConfig(compilation_config=CompilationConfig())
-
-        # Create vllm_config for parallel configuration
         vllm_config.parallel_config.tensor_parallel_size = self.od_config.parallel_config.tensor_parallel_size
         vllm_config.parallel_config.data_parallel_size = self.od_config.parallel_config.data_parallel_size
         self.vllm_config = vllm_config
+
+        # Initialize distributed environment
         with (set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config),
               set_current_vllm_config(self.vllm_config)):
             init_distributed_environment(world_size=world_size, rank=rank)
