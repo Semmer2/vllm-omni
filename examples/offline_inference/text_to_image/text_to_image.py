@@ -167,15 +167,13 @@ def main():
         tensor_parallel_size=args.tensor_parallel_size,
     )
 
-    # Check if profiling is requested via environment variable
-    profiler_enabled = bool(os.getenv("VLLM_TORCH_PROFILER_DIR"))
-
     omni = Omni(
         model=args.model,
         vae_use_slicing=args.vae_use_slicing,
         vae_use_tiling=args.vae_use_tiling,
         cache_backend=args.cache_backend,
         cache_config=cache_config,
+        
         enable_cache_dit_summary=args.enable_cache_dit_summary,
         parallel_config=parallel_config,
         enforce_eager=args.enforce_eager,
@@ -192,10 +190,7 @@ def main():
     print(f"  Model: {args.model}")
     print(f"  Inference steps: {args.num_inference_steps}")
     print(f"  Cache backend: {args.cache_backend if args.cache_backend else 'None (no acceleration)'}")
-    print(
-        f"  Parallel configuration: tensor_parallel_size={args.tensor_parallel_size}, "
-        f"ulysses_degree={args.ulysses_degree}, ring_degree={args.ring_degree}, cfg_parallel_size={args.cfg_parallel_size}"
-    )
+    print(f"  Parallel configuration: ulysses_degree={args.ulysses_degree}, ring_degree={args.ring_degree}")
     print(f"  Image size: {args.width}x{args.height}")
     print(f"{'=' * 60}\n")
 
