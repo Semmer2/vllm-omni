@@ -113,6 +113,7 @@ def initialize_model(
 
         return model
     else:
+        # improper error info
         raise ValueError(f"Model class {od_config.model_class_name} not found in diffusion model registry.")
 
 
