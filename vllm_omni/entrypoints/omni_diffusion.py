@@ -28,6 +28,7 @@ def prepare_requests(prompt: str | list[str], **kwargs):
 
     return OmniDiffusionRequest(**init_kwargs)
 
+from vllm_omni.diffusion.models.hunyuan_image3.pipeline_hunyuan_image_3 import get_hunyuan_image_3_pre_process_func
 
 class OmniDiffusion:
     """
@@ -84,7 +85,9 @@ class OmniDiffusion:
         prompt: str | list[str],
         **kwargs,
     ):
+        """
         prompts = []
+        print(kwargs)
         if isinstance(prompt, str):
             prompts.append(prompt)
         elif isinstance(prompt, list):
@@ -98,6 +101,7 @@ class OmniDiffusion:
         request_id = kwargs.get("request_id")
 
         for i, p in enumerate(prompts):
+            print(i,p)
             req_kwargs = kwargs.copy()
             if request_id is None:
                 # Generate default ID consistent with OmniLLM: "{i}_{uuid}"
@@ -109,6 +113,10 @@ class OmniDiffusion:
                     **req_kwargs,
                 )
             )
+        """
+        pre_processor = get_hunyuan_image_3_pre_process_func(self.od_config)
+        requests: list[OmniDiffusionRequest] = []
+        requests = pre_processor(requests,prompt)
         logger.info(f"Prepared {len(requests)} requests for generation.")
         return self._run_engine(requests)
 

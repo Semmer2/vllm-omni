@@ -11,7 +11,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.distributed
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models.autoencoders.autoencoder_kl_qwenimage import (
     AutoencoderKLQwenImage,
@@ -25,11 +24,6 @@ from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
-from vllm_omni.diffusion.distributed.parallel_state import (
-    get_cfg_group,
-    get_classifier_free_guidance_rank,
-    get_classifier_free_guidance_world_size,
-)
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.qwen_image.qwen_image_transformer import (
@@ -39,8 +33,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.model_executor.model_loader.weight_utils import (
     download_weights_from_hf_specific,
 )
-#from .hunyuanfunction import prepare_model_inputs, prepare_latents, prepare_extra_func_kwargs, _prepare_attention_mask_for_generation,prepare_inputs_for_generation,forward,_update_model_kwargs_for_generation
-##from .autoencoder_kl_3d import AutoencoderKLConv3D
+
 logger = logging.getLogger(__name__)
 
 
@@ -238,56 +231,6 @@ def apply_rotary_emb_qwen(
 
         return x_out.type_as(x)
 
-#new function
-from typing import Optional, Union, Any  
-class ClassifierFreeGuidance:
-    def __init__(
-        self,
-        use_original_formulation: bool = False,
-        start: float = 0.0,
-        stop: float = 1.0,
-    ):
-        super().__init__()
-        self.use_original_formulation = use_original_formulation
-
-    def __call__(
-            self,
-            pred_cond: torch.Tensor,
-            pred_uncond: Optional[torch.Tensor],
-            guidance_scale: float,
-            step: int,
-        ) -> torch.Tensor:
-
-        shift = pred_cond - pred_uncond
-        pred = pred_cond if self.use_original_formulation else pred_uncond
-        pred = pred + guidance_scale * shift
-
-        return pred
-
-from tqdm.auto import tqdm
-def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
-    r"""
-    Rescales `noise_cfg` tensor based on `guidance_rescale` to improve image quality and fix overexposure. Based on
-    Section 3.4 from [Common Diffusion Noise Schedules and Sample Steps are
-    Flawed](https://arxiv.org/pdf/2305.08891.pdf).
-
-    Args:
-        noise_cfg (`torch.Tensor`):
-            The predicted noise tensor for the guided diffusion process.
-        noise_pred_text (`torch.Tensor`):
-            The predicted noise tensor for the text-guided diffusion process.
-        guidance_rescale (`float`, *optional*, defaults to 0.0):
-            A rescale factor applied to the noise predictions.
-    Returns:
-        noise_cfg (`torch.Tensor`): The rescaled noise prediction tensor.
-    """
-    std_text = noise_pred_text.std(dim=list(range(1, noise_pred_text.ndim)), keepdim=True)
-    std_cfg = noise_cfg.std(dim=list(range(1, noise_cfg.ndim)), keepdim=True)
-    # rescale the results from guidance (fixes overexposure)
-    noise_pred_rescaled = noise_cfg * (std_text / std_cfg)
-    # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
-    noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
-    return noise_cfg
 
 class QwenImagePipeline(
     nn.Module,
@@ -300,7 +243,6 @@ class QwenImagePipeline(
     ):
         super().__init__()
         self.od_config = od_config
-        self.parallel_config = od_config.parallel_config
         self.weights_sources = [
             DiffusersPipelineLoader.ComponentSource(
                 model_or_path=od_config.model,
@@ -310,8 +252,6 @@ class QwenImagePipeline(
                 fall_back_to_pt=True,
             )
         ]
-        # Must start with APG_mode_
-        self.cfg_operator = ClassifierFreeGuidance()
 
         self.device = get_local_device()
         model = od_config.model
@@ -611,269 +551,41 @@ class QwenImagePipeline(
             # Broadcast timestep to match batch size
             timestep = t.expand(latents.shape[0]).to(device=latents.device, dtype=latents.dtype)
 
-            # Enable CFG-parallel: rank0 computes positive, rank1 computes negative.
-            cfg_parallel_ready = do_true_cfg and get_classifier_free_guidance_world_size() > 1
-
+            # Forward pass for positive prompt (or unconditional if no CFG)
             self.transformer.do_true_cfg = do_true_cfg
-
-            if cfg_parallel_ready:
-                cfg_group = get_cfg_group()
-                cfg_rank = get_classifier_free_guidance_rank()
-
-                if cfg_rank == 0:
-                    local_pred = self.transformer(
-                        hidden_states=latents,
-                        timestep=timestep / 1000,
-                        guidance=guidance,
-                        encoder_hidden_states_mask=prompt_embeds_mask,
-                        encoder_hidden_states=prompt_embeds,
-                        img_shapes=img_shapes,
-                        txt_seq_lens=txt_seq_lens,
-                        attention_kwargs=self.attention_kwargs,
-                        return_dict=False,
-                    )[0]
-                else:
-                    local_pred = self.transformer(
-                        hidden_states=latents,
-                        timestep=timestep / 1000,
-                        guidance=guidance,
-                        encoder_hidden_states_mask=negative_prompt_embeds_mask,
-                        encoder_hidden_states=negative_prompt_embeds,
-                        img_shapes=img_shapes,
-                        txt_seq_lens=negative_txt_seq_lens,
-                        attention_kwargs=self.attention_kwargs,
-                        return_dict=False,
-                    )[0]
-
-                gathered = cfg_group.all_gather(local_pred, separate_tensors=True)
-                if cfg_rank == 0:
-                    noise_pred = gathered[0]
-                    neg_noise_pred = gathered[1]
-                    comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
-                    cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-                    noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-                    noise_pred = comb_pred * (cond_norm / noise_norm)
-                    latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-                cfg_group.broadcast(latents, src=0)
-
-            else:
-                # Forward pass for positive prompt (or unconditional if no CFG)
-                noise_pred = self.transformer(
+            noise_pred = self.transformer(
+                hidden_states=latents,
+                timestep=timestep / 1000,
+                guidance=guidance,
+                encoder_hidden_states_mask=prompt_embeds_mask,
+                encoder_hidden_states=prompt_embeds,
+                img_shapes=img_shapes,
+                txt_seq_lens=txt_seq_lens,
+                attention_kwargs=self.attention_kwargs,
+                return_dict=False,
+            )[0]
+            # Forward pass for negative prompt (CFG)
+            if do_true_cfg:
+                neg_noise_pred = self.transformer(
                     hidden_states=latents,
                     timestep=timestep / 1000,
                     guidance=guidance,
-                    encoder_hidden_states_mask=prompt_embeds_mask,
-                    encoder_hidden_states=prompt_embeds,
+                    encoder_hidden_states_mask=negative_prompt_embeds_mask,
+                    encoder_hidden_states=negative_prompt_embeds,
                     img_shapes=img_shapes,
-                    txt_seq_lens=txt_seq_lens,
+                    txt_seq_lens=negative_txt_seq_lens,
                     attention_kwargs=self.attention_kwargs,
                     return_dict=False,
                 )[0]
-                # Forward pass for negative prompt (CFG)
-                if do_true_cfg:
-                    neg_noise_pred = self.transformer(
-                        hidden_states=latents,
-                        timestep=timestep / 1000,
-                        guidance=guidance,
-                        encoder_hidden_states_mask=negative_prompt_embeds_mask,
-                        encoder_hidden_states=negative_prompt_embeds,
-                        img_shapes=img_shapes,
-                        txt_seq_lens=negative_txt_seq_lens,
-                        attention_kwargs=self.attention_kwargs,
-                        return_dict=False,
-                    )[0]
-                    comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
-                    cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
-                    noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
-                    noise_pred = comb_pred * (cond_norm / noise_norm)
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                comb_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
+                cond_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
+                noise_norm = torch.norm(comb_pred, dim=-1, keepdim=True)
+                noise_pred = comb_pred * (cond_norm / noise_norm)
+            # compute the previous noisy sample x_t -> x_t-1
+            latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
         return latents
-    
-    @torch.compiler.disable
-    def progress_bar(self, iterable=None, total=None):
-        if not hasattr(self, "_progress_bar_config"):
-            self._progress_bar_config = {}
-        elif not isinstance(self._progress_bar_config, dict):
-            raise ValueError(
-                f"`self._progress_bar_config` should be of type `dict`, but is {type(self._progress_bar_config)}."
-            )
 
-        if iterable is not None:
-            return tqdm(iterable, **self._progress_bar_config)
-        elif total is not None:
-            return tqdm(total=total, **self._progress_bar_config)
-        else:
-            raise ValueError("Either `total` or `iterable` has to be defined.")
-
-    def set_progress_bar_config(self, **kwargs):
-        self._progress_bar_config = kwargs
-
-    def forward_test(
-        self,
-        req: OmniDiffusionRequest,
-        prompt: str | list[str] = "",
-        negative_prompt: str | list[str] = "",
-        true_cfg_scale: float = 4.0,
-        height: int | None = None,
-        width: int | None = None,
-        num_inference_steps: int = 50,
-        sigmas: list[float] | None = None,
-        guidance_scale: float = 1.0,
-        num_images_per_prompt: int = 1,
-        generator: torch.Generator | list[torch.Generator] | None = None,
-        latents: torch.Tensor | None = None,
-        prompt_embeds: torch.Tensor | None = None,
-        prompt_embeds_mask: torch.Tensor | None = None,
-        negative_prompt_embeds: torch.Tensor | None = None,
-        negative_prompt_embeds_mask: torch.Tensor | None = None,
-        output_type: str | None = "pil",
-        attention_kwargs: dict[str, Any] | None = None,
-        callback_on_step_end_tensor_inputs: list[str] = ["latents"],
-        max_sequence_length: int = 512,
-    ) -> DiffusionOutput:
-        
-        prompt = req.prompt if prompt is None else prompt
-        negative_prompt = req.negative_prompt if negative_prompt is None else negative_prompt
-        #height and width are prepare for image
-        height = req.height or height or 1024
-        width  = req.width  or width  or 1024
-        num_inference_steps = req.num_inference_steps or num_inference_steps
-        generator = req.generator or generator
-        true_cfg_scale = req.true_cfg_scale or true_cfg_scale
-        batch_size = getattr(req, "num_outputs_per_prompt", 1)
-        model_kwargs, streamer_set, tmpconfig = prepare_model_inputs(
-            prompt=prompt, cot_text=None, system_prompt=None, mode="gen_image", 
-            image_size=(height, width), device=self.device, tokenizer = "/data1/s00957182/hy/weights/HunyuanImage-3.0"
-        )
-        """
-        verbose = 0
-        input_kwargs = dict(
-        diff_infer_steps=diff_infer_steps_set,
-        streamer=streamer_set,
-        )
-        samples, pipelineresult = generate_inputs(**model_inputs, **input_kwargs, verbose=verbose)
-        """
-        do_classifier_free_guidance = False
-        #whether do classifier free guidance
-        if guidance_scale > 1.0:
-            do_classifier_free_guidance = True
-        req_num_outputs = getattr(req, "num_outputs_per_prompt", None)
-        if req_num_outputs and req_num_outputs > 0:
-            num_images_per_prompt = req_num_outputs
-        cfg_factor = 1 + do_classifier_free_guidance
-        guidance_rescale = req.guidance_rescale
-        # Define call parameters
-        device = self.device
-        #only take for image generation
-        #set for step
-        diff_infer_steps_set = num_inference_steps
-        #need for prepare latent
-        #latent_channel=self.model.config.vae["latent_channels"]
-        latents = prepare_latents(
-            batch_size=batch_size,
-            latent_channel=32,
-            image_size=(height, width),
-            dtype=torch.bfloat16,
-            device=device,
-            generator=generator,
-            latents=latents,
-        )
-        #latents shape 1,32,64,64   batch_size,latent_channel, *[int(s) // f for s, f in zip(image_size, latent_scale_factor)],
-        timesteps, num_inference_steps = self.prepare_timesteps(num_inference_steps, sigmas, 1) #single picture set 1
-        # num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-        # Prepare extra step kwargs.
-        _scheduler_step_extra_kwargs = prepare_extra_func_kwargs(
-            self.scheduler.step, {"generator": generator}
-        )
-        # Prepare model kwargs
-        input_ids = model_kwargs.pop("input_ids")#2,4102
-        attention_mask = _prepare_attention_mask_for_generation(     # noqa
-            input_ids, model_kwargs=model_kwargs,
-        )
-        model_kwargs["attention_mask"] = attention_mask.to(latents.device)
-        # Sampling loop
-        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-        self._num_timesteps = len(timesteps)
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-                    for i, t in enumerate(timesteps):
-                        # expand the latents if we are doing classifier free guidance
-                        latent_model_input = torch.cat([latents] * cfg_factor)
-                        #latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-                        t_expand = t.repeat(latent_model_input.shape[0])
-                        model_inputs = prepare_inputs_for_generation(
-                            input_ids,
-                            images=latent_model_input,
-                            timestep=t_expand,
-                            **model_kwargs,
-                            )
-                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                            model_output = forward(**model_inputs, first_step=(i == 0))#forward
-                            pred = model_output["diffusion_prediction"]
-                        pred = pred.to(dtype=torch.float32)
-                        # perform guidance
-                        if do_classifier_free_guidance:
-                            pred_cond, pred_uncond = pred.chunk(2)
-                            pred = self.cfg_operator(pred_cond, pred_uncond, self.guidance_scale, step=i)
-                        if do_classifier_free_guidance and guidance_rescale > 0.0:
-                        # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                            pred = rescale_noise_cfg(pred, pred_cond, guidance_rescale=guidance_rescale)
-                        # compute the previous noisy sample x_t -> x_t-1
-                        latents = self.scheduler.step(pred, t, latents, **_scheduler_step_extra_kwargs, return_dict=False)[0]
-                        if i != len(timesteps) - 1:
-                            model_kwargs = _update_model_kwargs_for_generation(  # noqa
-                                model_output,
-                                model_kwargs,
-                            )
-                            if input_ids.shape[1] != model_kwargs["position_ids"].shape[1]:
-                                input_ids = torch.gather(input_ids, 1, index=model_kwargs["position_ids"])
-                        #set callback_on_step_end None
-                        # call the callback, if provided
-                        if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                            progress_bar.update()
-        #vae for debug
-        vae = AutoencoderKLConv3D.from_config(tmpconfig.vae)
-        if hasattr(vae.config, 'scaling_factor') and vae.config.scaling_factor:
-            latents = latents / vae.config.scaling_factor
-        if hasattr(vae.config, 'shift_factor') and vae.config.shift_factor:
-            latents = latents + vae.config.shift_factor
-        if hasattr(vae, "ffactor_temporal"):
-            latents = latents.unsqueeze(2)
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
-            image = vae.decode(latents, return_dict=False, generator=generator)[0]
-        if hasattr(vae, "ffactor_temporal"):
-            assert image.shape[2] == 1, "image should have shape [B, C, T, H, W] and T should be 1"
-            image = image.squeeze(2)
-        return DiffusionOutput(output=image)
-
-    from typing import Any, Callable, Dict, List
-    from typing import Optional, Tuple, Union
-    from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
-    @torch.no_grad()
     def forward(
-        self,
-        batch_size: int,
-        image_size: List[int],
-        num_inference_steps: int = 50,
-        timesteps: List[int] = None,
-        sigmas: List[float] = None,
-        guidance_scale: float = 7.5,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.Tensor] = None,
-        output_type: Optional[str] = "pil",
-        return_dict: bool = True,
-        guidance_rescale: float = 0.0,
-        callback_on_step_end: Optional[
-            Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]
-        ] = None,
-        callback_on_step_end_tensor_inputs: List[str] = ["latents"],
-        model_kwargs: Dict[str, Any] = None,
-        **kwargs,
-    ):
-        image = torch.randn(1, 3, 1024, 1024)#标准正态分布
-        return DiffusionOutput(output=image)
-
-    def forward_qwen(
         self,
         req: OmniDiffusionRequest,
         prompt: str | list[str] = "",

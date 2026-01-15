@@ -62,6 +62,7 @@ class DiffusionEngine:
         Args:
             config: The configuration for the diffusion engine.
         """
+        #print(od_config)
         self.od_config = od_config
 
         self.post_process_func = get_diffusion_post_process_func(od_config)
@@ -76,7 +77,7 @@ class DiffusionEngine:
             # Apply pre-processing if available
             if self.pre_process_func is not None:
                 preprocess_start_time = time.time()
-                requests = self.pre_process_func(requests)
+                requests = self.pre_process_func(requests)#查看requests
                 preprocess_time = time.time() - preprocess_start_time
                 logger.info(f"Pre-processing completed in {preprocess_time:.4f} seconds")
 

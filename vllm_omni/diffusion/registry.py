@@ -126,6 +126,7 @@ _DIFFUSION_PRE_PROCESS_FUNCS = {
     "QwenImageLayeredPipeline": "get_qwen_image_layered_pre_process_func",
     "WanPipeline": "get_wan22_pre_process_func",
     "WanImageToVideoPipeline": "get_wan22_i2v_pre_process_func",
+    "HunyuanImage3Pipeline": "get_hunyuan_image_3_pre_process_func",
 }
 
 

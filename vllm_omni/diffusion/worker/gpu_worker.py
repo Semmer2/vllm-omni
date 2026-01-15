@@ -29,7 +29,7 @@ from vllm_omni.diffusion.request import OmniDiffusionRequest
 
 logger = init_logger(__name__)
 
-
+from vllm_omni.diffusion.models.hunyuan_image3.config.generation_config import generation_config
 class GPUWorker:
     """
     A worker that executes the model on a single GPU.
@@ -136,7 +136,16 @@ class GPUWorker:
         if self.cache_backend is not None and self.cache_backend.is_enabled():
             self.cache_backend.refresh(self.pipeline, req.num_inference_steps)
         with set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config):
-            output = self.pipeline.forward(req)
+            #output = self.pipeline.forward(req)
+            batch_gen_image_info: List[ImageInfo] = req.extra.get("batch_gen_image_info")
+            if batch_gen_image_info is None:
+                raise ValueError("`batch_gen_image_info` should be provided when `mode` is `gen_image`.")
+            output = self.pipeline.forward(batch_size=len(batch_gen_image_info),
+                image_size=[batch_gen_image_info[0].image_height, batch_gen_image_info[0].image_width],
+                num_inference_steps=req.extra.get("diff_infer_steps", generation_config["diff_infer_steps"]),
+                guidance_scale=req.extra.get("diff_guidance_scale", generation_config["diff_guidance_scale"]),
+                generator=req.extra.get("generator"),
+                model_kwargs=req.extra)
         return output
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
