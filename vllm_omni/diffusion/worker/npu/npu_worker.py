@@ -72,7 +72,7 @@ class NPUWorker:
             init_distributed_environment(world_size=world_size, rank=rank)
             logger.info(f"Worker {self.rank}: Initialized device and distributed environment.")
             parallel_config = self.od_config.parallel_config
-            print("NPU worker call ")
+            print("---------NPU worker call ------------")
             initialize_model_parallel(
                 data_parallel_size=parallel_config.data_parallel_size,
                 cfg_parallel_size=parallel_config.cfg_parallel_size,
@@ -82,6 +82,8 @@ class NPUWorker:
                 tensor_parallel_size=parallel_config.tensor_parallel_size,
                 pipeline_parallel_size=parallel_config.pipeline_parallel_size,
             )
+            from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+            init_ascend_model_parallel(parallel_config)
 
             load_config = LoadConfig()
             model_loader = DiffusersPipelineLoader(load_config)
