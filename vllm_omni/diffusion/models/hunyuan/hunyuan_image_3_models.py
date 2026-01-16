@@ -7,13 +7,15 @@ from typing import Optional, Tuple, Any, List, Union, Iterable, cast
 import numpy as np
 from PIL import Image
 import regex as re
+import math
 
 import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
 
-from vllm.attention.layer import Attention
+# from vllm.attention.layer import Attention
+from vllm_omni.diffusion.attention.layer import Attention
 from vllm.attention.backends.abstract import AttentionType
 from vllm.config import CacheConfig
 from vllm.distributed import (
@@ -27,11 +29,18 @@ from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.utils import is_pp_missing_parameter
+from vllm.model_executor.models.utils import (
+    PPMissingLayer,
+    is_pp_missing_parameter,
+    make_layers,
+)
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ColumnParallelLinear,
@@ -39,7 +48,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-# from vllm_omni.diffusion.distributed.parallel_state import get_ep_group
+from vllm_omni.diffusion.distributed.parallel_state import get_pp_group
 
 from mindiesd import rotary_position_embedding
 
@@ -52,9 +61,12 @@ from diffusers.utils.torch_utils import randn_tensor
 from diffusers.utils import BaseOutput
 from transformers.activations import ACT2FN
 from transformers import PretrainedConfig
-from transformers.cache_utils import Cache
+from transformers.cache_utils import Cache, StaticCache
 from transformers.modeling_utils import PreTrainedModel
-from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+)
 
 from .hunyuan_image3_utils import (
     HunYuanImageAttentionMeta,
@@ -177,6 +189,11 @@ def topkgating(
     exp_capacity_rate = exp_counts_capacity / (logits.shape[0] * topk)
 
     return [l_aux, exp_capacity_rate], combine_weights, dispatch_mask, exp_counts
+
+
+@dataclass
+class CausalMMOutputWithPast(CausalLMOutputWithPast):
+    diffusion_prediction: Optional[torch.Tensor] = None
 
 
 class HunyuanImage3Config(PretrainedConfig):
@@ -1063,6 +1080,7 @@ class HunYuanSparseMoeBlock(nn.Module):
 
         return final_hidden_states.view(orig_shape)
 
+
 def _get_cla_factor(config: PretrainedConfig) -> int:
     if not getattr(config, "use_cla", False):
         return 1
@@ -1091,6 +1109,7 @@ class HunYuanAttention(nn.Module):
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
+        self.num_key_value_heads = config.num_key_value_heads // tp_size if config.num_key_value_heads else self.num_heads
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
@@ -1144,13 +1163,16 @@ class HunYuanAttention(nn.Module):
             rope_parameters=rope_scaling,
             is_neox_style=True,
         )
+        # which attention, from vllm or omni?
+        # try use Atten from diffusion
         self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
+            num_heads=self.num_heads,
+            head_size=self.head_dim,
+            causal=False,
+            softmax_scale=self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            # cache_config=cache_config,
+            # quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -1173,14 +1195,24 @@ class HunYuanAttention(nn.Module):
         kv_states: tuple[torch.Tensor] | None = None,
         attention_mask: torch.Tensor | None = None,
         custom_pos_emb: tuple[torch.FloatTensor] | None = None,
+        **kwargs,
     ) -> torch.Tensor:
-        attn_meta = get_forward_context().attn_metadata
+
+        bsz, q_len, _ = hidden_states.size()
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        past_key_value: Optional[Cache] = kwargs.get("past_key_value", None)
+        if past_key_value is not None:
+            position_ids = kwargs.get("position_ids")
+            key_states = k.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            value_states = v.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+            cache_kwargs = {"cache_position": position_ids}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_id, cache_kwargs)
         # for image_generation
-        if attn_meta is not None and isinstance(attn_meta, HunYuanImageAttentionMeta):
-            assert positions is None, "positions should be None for image attention"
-            q, k = self.image_rope2d_emb(q, k, hidden_states, custom_pos_emb, attn_meta)
+        if kwargs.get("mode", "gen_text") == "gen_image":
+            # assert positions is None, "positions should be None for image attention"
+            q, k = self.image_rope2d_emb(q, k, hidden_states, custom_pos_emb, **kwargs)
         else:
             q, k = self.rotary_emb(positions, q, k)
         ori_k = k
@@ -1192,16 +1224,17 @@ class HunYuanAttention(nn.Module):
                 k.view(-1, self.num_kv_heads, self.head_dim).contiguous()
             )
         # for image_generation
-        if attn_meta is not None and isinstance(attn_meta, HunYuanImageAttentionMeta):
+        if kwargs.get("mode", "gen_text") == "gen_image":
             attn_output = self.image_attn(
-                q, k, v, attn_meta, attention_mask=attention_mask
+                q, k, v, attention_mask=attention_mask, **kwargs
             )
         else:
             attn_output = self.attn(q, k, v)
         # For o_proj
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
-        return output, (ori_k, v)
+        output = output.reshape(bsz, q_len, -1)
+        return output, None, past_key_value
 
 
 class HunYuanCrossAttention(nn.Module):
@@ -1445,16 +1478,21 @@ class HunyuanImage3DecoderLayer(nn.Module):
 
 
         # Self Attention
+        # hidden_states, ori_kv_states = self.self_attn(
+        #     positions=position_ids,
+        #     hidden_states=hidden_states,
+        #     kv_states
+        # )
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
-            position_ids=position_ids,
+            custom_pos_emb=custom_pos_emb,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
-            custom_pos_emb=custom_pos_emb,
             **kwargs,
         )
+        print(f"---------residual:{residual.shape}, hidden_states:{hidden_states.shape}")
         hidden_states = residual + hidden_states
         # Fully Connected
         residual = hidden_states
@@ -1515,25 +1553,54 @@ def _get_cla_factor(config: PretrainedConfig) -> int:
     return getattr(config, "cla_share_factor", 1)
 
 
-class HunyuanImage3Model(HunyuanImage3PreTrainedModel):
+class HunyuanImage3Model(nn.Module):
     def __init__(self, config: HunyuanImage3Config, prefix: str = ""):
-        super().__init__(config)
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
-        self.add_classification_head = config.add_classification_head
+        super().__init__()
+
+        config = config
+        cache_config = None
+        quant_config = None
+        lora_config = None
+        eplb_config = None
+        enable_eplb = False
         self.num_redundant_experts = 0
-        self.quant_config = None
-        self.wte = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList(
-            [HunyuanImage3DecoderLayer(config, layer_idx, f"{prefix}.layers.{layer_idx}") for layer_idx in range(config.num_hidden_layers)]
+
+        self.config = config
+        self.quant_config = quant_config
+        self.padding_idx = config.pad_token_id
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
         )
-        if not config.add_classification_head:
-            self.ln_f = HunyuanRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-        self.shared_tensor = None
+        self.vocab_size = config.vocab_size + lora_vocab
+        self.org_vocab_size = config.vocab_size
+        self.wte = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        if get_pp_group().is_first_rank or (
+            config.tie_word_embeddings and get_pp_group().is_last_rank
+        ):
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                quant_config=quant_config,
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
+        # maybe should not use make_layers()
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: HunyuanImage3DecoderLayer(
+                config=config,
+                layer_idx=int(prefix.split(".")[-1]),
+                prefix=prefix,
+            ),
+            prefix=f"{prefix}.layers",
+        )
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
 
     def _split_qkv_weight(self, qkv: torch.Tensor):
         num_attention_heads = self.config.num_attention_heads
@@ -1578,6 +1645,7 @@ class HunyuanImage3Model(HunyuanImage3PreTrainedModel):
         else:
             return [], {}
 
+    # rename for delay load
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         tp_rank = get_tensor_model_parallel_rank()
         print(f"load tp: {tp_rank}")
@@ -1608,6 +1676,7 @@ class HunyuanImage3Model(HunyuanImage3PreTrainedModel):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        pass
         expert_params_mapping, expert_weights_remapping = self.get_expert_mapping()
 
         # List of unexpected keywords in weight names
@@ -1830,6 +1899,9 @@ class HunyuanImage3Model(HunyuanImage3PreTrainedModel):
             custom_pos_emb: Optional[Tuple[torch.FloatTensor]] = None,
             mode: str = "gen_text",
             first_step: Optional[bool] = None,
+            query_lens: Optional[list[int]] = None,
+            seq_lens: Optional[list[int]] = None,
+            num_image_tokens: Optional[int] = None,
             gen_timestep_scatter_index: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
@@ -1859,7 +1931,8 @@ class HunyuanImage3Model(HunyuanImage3PreTrainedModel):
 
             
             layer_outputs = decoder_layer(
-                hidden_states,
+                positions=None,
+                hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_value=past_key_values,
@@ -1868,6 +1941,9 @@ class HunyuanImage3Model(HunyuanImage3PreTrainedModel):
                 custom_pos_emb=custom_pos_emb,
                 mode=mode,
                 first_step=first_step,
+                query_lens=query_lens,
+                seq_lens=seq_lens,
+                num_image_tokens=num_image_tokens,
                 gen_timestep_scatter_index=gen_timestep_scatter_index,
             )
 
@@ -2290,6 +2366,102 @@ class ClassifierFreeGuidance:
         return pred
 
 
+def retrieve_timesteps(
+    scheduler,
+    num_inference_steps: Optional[int] = None,
+    device: Optional[Union[str, torch.device]] = None,
+    timesteps: Optional[List[int]] = None,
+    sigmas: Optional[List[float]] = None,
+    **kwargs,
+):
+    """
+    Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
+    custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
+
+    Args:
+        scheduler (`SchedulerMixin`):
+            The scheduler to get timesteps from.
+        num_inference_steps (`int`):
+            The number of diffusion steps used when generating samples with a pre-trained model. If used, `timesteps`
+            must be `None`.
+        device (`str` or `torch.device`, *optional*):
+            The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
+        timesteps (`List[int]`, *optional*):
+            Custom timesteps used to override the timestep spacing strategy of the scheduler. If `timesteps` is passed,
+            `num_inference_steps` and `sigmas` must be `None`.
+        sigmas (`List[float]`, *optional*):
+            Custom sigmas used to override the timestep spacing strategy of the scheduler. If `sigmas` is passed,
+            `num_inference_steps` and `timesteps` must be `None`.
+
+    Returns:
+        `Tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
+        second element is the number of inference steps.
+    """
+    if timesteps is not None and sigmas is not None:
+        raise ValueError("Only one of `timesteps` or `sigmas` can be passed. Please choose one to set custom values")
+    if timesteps is not None:
+        accepts_timesteps = "timesteps" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
+        if not accepts_timesteps:
+            raise ValueError(
+                f"The current scheduler class {scheduler.__class__}'s `set_timesteps` does not support custom"
+                f" timestep schedules. Please check whether you are using the correct scheduler."
+            )
+        scheduler.set_timesteps(timesteps=timesteps, device=device, **kwargs)
+        timesteps = scheduler.timesteps
+        num_inference_steps = len(timesteps)
+    elif sigmas is not None:
+        accept_sigmas = "sigmas" in set(inspect.signature(scheduler.set_timesteps).parameters.keys())
+        if not accept_sigmas:
+            raise ValueError(
+                f"The current scheduler class {scheduler.__class__}'s `set_timesteps` does not support custom"
+                f" sigmas schedules. Please check whether you are using the correct scheduler."
+            )
+        scheduler.set_timesteps(sigmas=sigmas, device=device, **kwargs)
+        timesteps = scheduler.timesteps
+        num_inference_steps = len(timesteps)
+    else:
+        scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
+        timesteps = scheduler.timesteps
+    return timesteps, num_inference_steps
+
+
+def real_batched_index_select(t, dim, idx):
+    """ index_select for batched index and batched t """
+    assert t.ndim >= 2 and idx.ndim >= 2, f"{t.ndim=} {idx.ndim=}"
+    assert len(t) == len(idx), f"{len(t)=} != {len(idx)=}"
+    return torch.stack([torch.index_select(t[i], dim - 1, idx[i]) for i in range(len(t))])
+
+
+@dataclass
+class HunyuanImage3Text2ImagePipelineOutput(BaseOutput):
+    samples: Union[List[Any], np.ndarray]
+
+
+def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
+    r"""
+    Rescales `noise_cfg` tensor based on `guidance_rescale` to improve image quality and fix overexposure. Based on
+    Section 3.4 from [Common Diffusion Noise Schedules and Sample Steps are
+    Flawed](https://arxiv.org/pdf/2305.08891.pdf).
+
+    Args:
+        noise_cfg (`torch.Tensor`):
+            The predicted noise tensor for the guided diffusion process.
+        noise_pred_text (`torch.Tensor`):
+            The predicted noise tensor for the text-guided diffusion process.
+        guidance_rescale (`float`, *optional*, defaults to 0.0):
+            A rescale factor applied to the noise predictions.
+    Returns:
+        noise_cfg (`torch.Tensor`): The rescaled noise prediction tensor.
+    """
+    std_text = noise_pred_text.std(dim=list(range(1, noise_pred_text.ndim)), keepdim=True)
+    std_cfg = noise_cfg.std(dim=list(range(1, noise_cfg.ndim)), keepdim=True)
+    # rescale the results from guidance (fixes overexposure)
+    noise_pred_rescaled = noise_cfg * (std_text / std_cfg)
+    # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
+    noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
+    return noise_cfg
+
+
 class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
     r"""
     Pipeline for condition-to-sample generation using Stable Diffusion.
@@ -2563,6 +2735,11 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
         attention_mask = self.model._prepare_attention_mask_for_generation(     # noqa
             input_ids, self.model.generation_config, model_kwargs=model_kwargs,
         )
+        b, _, q_len1, seq_len = attention_mask.shape
+        query_lens=[q_len1] * b
+        seq_lens=[seq_len] * b
+        model_kwargs["query_lens"] = query_lens
+        model_kwargs["seq_lens"] = seq_lens
         model_kwargs["attention_mask"] = attention_mask.to(latents.device)
 
         # Sampling loop
@@ -2585,7 +2762,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
                 )
 
                 with torch.autocast(device_type="npu", dtype=torch.bfloat16, enabled=True):
-                    model_output = self.model(**model_inputs, first_step=(i == 0))
+                    model_output = self.model.forward_call(**model_inputs, first_step=(i == 0))
                     pred = model_output["diffusion_prediction"]
                 pred = pred.to(dtype=torch.float32)
 
@@ -2659,6 +2836,35 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
         return HunyuanImage3Text2ImagePipelineOutput(samples=image)
 
 
+def timestep_embedding(t, dim, max_period=10000):
+    """
+    Create sinusoidal timestep embeddings.
+
+    Args:
+        t (torch.Tensor): a 1-D Tensor of N indices, one per batch element. These may be fractional.
+        dim (int): the dimension of the output.
+        max_period (int): controls the minimum frequency of the embeddings.
+
+    Returns:
+        embedding (torch.Tensor): An (N, D) Tensor of positional embeddings.
+
+    .. ref_link: https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+    """
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(max_period)
+        * torch.arange(start=0, end=half, dtype=torch.float32)
+        / half
+    ).to(device=t.device)
+    args = t[:, None].float() * freqs[None]
+    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    if dim % 2:
+        embedding = torch.cat(
+            [embedding, torch.zeros_like(embedding[:, :1])], dim=-1
+        )
+    return embedding
+
+
 class TimestepEmbedder(nn.Module):
     """
     Embeds scalar timesteps into vector representations.
@@ -2730,6 +2936,180 @@ def zero_module(module):
     for p in module.parameters():
         p.detach().zero_()
     return module
+
+
+def _to_tuple(x, dim=2):
+    if isinstance(x, int):
+        return (x,) * dim
+    elif len(x) == dim:
+        return x
+    else:
+        raise ValueError(f"Expected length {dim} or int, but got {x}")
+
+
+def get_meshgrid_nd(start, *args, dim=2):
+    """
+    Get n-D meshgrid with start, stop and num.
+
+    Args:
+        start (int or tuple): If len(args) == 0, start is num; If len(args) == 1, start is start, args[0] is stop,
+            step is 1; If len(args) == 2, start is start, args[0] is stop, args[1] is num. For n-dim, start/stop/num
+            should be int or n-tuple. If n-tuple is provided, the meshgrid will be stacked following the dim order in
+            n-tuples.
+        *args: See above.
+        dim (int): Dimension of the meshgrid. Defaults to 2.
+
+    Returns:
+        grid (np.ndarray): [dim, ...]
+    """
+    if len(args) == 0:
+        # start is grid_size
+        num = _to_tuple(start, dim=dim)
+        start = (0,) * dim
+        stop = num
+    elif len(args) == 1:
+        # start is start, args[0] is stop, step is 1
+        start = _to_tuple(start, dim=dim)
+        stop = _to_tuple(args[0], dim=dim)
+        num = [stop[i] - start[i] for i in range(dim)]
+        # assert num are all integers
+        num_int = [int(x) for x in num]
+        assert (torch.tensor(num) == torch.tensor(num_int)).all(), f"num should be int, but got {num}"
+        num = num_int
+    elif len(args) == 2:
+        # start is start, args[0] is stop, args[1] is num
+        start = _to_tuple(start, dim=dim)       # Left-Top       eg: 12,0
+        stop = _to_tuple(args[0], dim=dim)      # Right-Bottom   eg: 20,32
+        num = _to_tuple(args[1], dim=dim)       # Target Size    eg: 32,124
+    else:
+        raise ValueError(f"len(args) should be 0, 1 or 2, but got {len(args)}")
+
+    # PyTorch implement of np.linspace(start[i], stop[i], num[i], endpoint=False)
+    axis_grid = []
+    for i in range(dim):
+        a, b, n = start[i], stop[i], num[i]
+        g = torch.linspace(a, b, n + 1, dtype=torch.float32)[:n]
+        axis_grid.append(g)
+    grid = torch.meshgrid(*axis_grid, indexing="ij")   # dim x [H, W]
+    grid = torch.stack(grid, dim=0)     # [dim, H, W]
+
+    return grid
+
+
+def build_2d_rope(
+        seq_len: int, n_elem: int, image_infos: Optional[List[Tuple[slice, Tuple[int, int]]]] = None,
+        device: Optional[torch.device] = None, base: int = 10000, base_rescale_factor: float = 1.0,
+        return_all_pos: bool = False,
+):
+    """
+    Reference: https://kexue.fm/archives/10352
+
+    Start from 1, we have
+        beta_y = L + (wh - h)/2
+        beta_x = L + (wh - w)/2
+
+    Returns
+    -------
+    cos: torch.Tensor with shape of [seq_len, n_elem]
+    sin: torch.Tensor with shape of [seq_len, n_elem]
+    """
+    assert n_elem % 4 == 0, f"n_elem must be divisible by 4, but got {n_elem}."
+
+    # theta
+    if base_rescale_factor != 1.0:
+        base *= base_rescale_factor ** (n_elem / (n_elem - 2))
+    theta = 1.0 / (base ** (torch.arange(0, n_elem, 2, device=device).float() / n_elem))
+    theta = theta.reshape(1, n_elem // 4, 2)    # [1, half_d, 2]
+
+    # position indices
+    if image_infos is None:
+        image_infos = []
+
+    image_infos_list = [image_infos]
+    sample_seq_lens = [seq_len]
+
+    # Prepare position indices for each sample
+    x_sections = []
+    y_sections = []
+    for sample_id, sample_image_infos in enumerate(image_infos_list):
+        last_pos = 0
+        for sec_slice, (h, w) in sample_image_infos:
+            L = sec_slice.start   # start from 0, so image_slice.start is just L
+            # previous text
+            if last_pos < L:
+                y_sections.append(torch.arange(last_pos, L))
+                x_sections.append(torch.arange(last_pos, L))
+            elif h is None:
+                # Interleave data has overlapped positions for <boi> <size> <ratio> <timestep> <eoi> tokens.
+                y_sections.append(torch.arange(sec_slice.start, sec_slice.stop))
+                x_sections.append(torch.arange(sec_slice.start, sec_slice.stop))
+                continue
+            else:
+                # Interleave data has overlapped positions for noised image and the successive clean image,
+                # leading to last_pos (= last text end L + noise w * h) > L (last text end L).
+                pass
+            # current image
+            beta_y = L + (w * h - h) / 2
+            beta_x = L + (w * h - w) / 2
+            grid = get_meshgrid_nd((beta_y, beta_x), (beta_y + h, beta_x + w))  # [2, h, w]
+            grid = grid.reshape(2, -1)  # (y, x)
+            y_sections.append(grid[0])
+            x_sections.append(grid[1])
+            # step
+            last_pos = L + w * h
+        # final text
+        y_sections.append(torch.arange(last_pos, sample_seq_lens[sample_id]))
+        x_sections.append(torch.arange(last_pos, sample_seq_lens[sample_id]))
+
+    x_pos = torch.cat(x_sections).long()
+    y_pos = torch.cat(y_sections).long()
+    # If there are overlap positions, we need to remove them.
+    x_pos = x_pos[:seq_len]
+    y_pos = y_pos[:seq_len]
+    all_pos = torch.stack((y_pos, x_pos), dim=1).unsqueeze(1).to(device)    # [seq_len, 1, 2]
+
+    # calc rope
+    idx_theta = (all_pos * theta).reshape(all_pos.shape[0], n_elem // 2).repeat(1, 2)
+
+    cos = torch.cos(idx_theta)
+    sin = torch.sin(idx_theta)
+
+    if return_all_pos:
+        return cos, sin, all_pos
+
+    return cos, sin
+
+
+def build_batch_2d_rope(
+        seq_len: int, n_elem: int, image_infos: Optional[List[List[Tuple[slice, Tuple[int, int]]]]] = None,
+        device: Optional[torch.device] = None, base: int = 10000, base_rescale_factor: float = 1.0,
+        return_all_pos: bool = False,
+):
+    cos_list, sin_list, all_pos_list = [], [], []
+    if image_infos is None:
+        image_infos = [None]
+    for i, image_info in enumerate(image_infos):
+        res = build_2d_rope(
+            seq_len, n_elem, image_infos=image_info, device=device,
+            base=base, base_rescale_factor=base_rescale_factor,
+            return_all_pos=return_all_pos,
+        )
+        if return_all_pos:
+            cos, sin, all_pos = res
+        else:
+            cos, sin = res
+            all_pos = None
+        cos_list.append(cos)
+        sin_list.append(sin)
+        all_pos_list.append(all_pos)
+
+    stacked_cos = torch.stack(cos_list, dim=0)
+    stacked_sin = torch.stack(sin_list, dim=0)
+
+    if return_all_pos:
+        return stacked_cos, stacked_sin, all_pos_list
+
+    return stacked_cos, stacked_sin
 
 
 class ResBlock(nn.Module):
@@ -2956,3 +3336,90 @@ class UNetUp(nn.Module):
             else:
                 x = module(x)
         return x
+
+
+class HunyuanStaticCache(StaticCache):
+    """
+    A custom static cache for multi-modal models that supports dynamic extension of the cache
+    and inplace updates of the cache.
+
+    This cache supports batch cache_position updates.
+    """
+    def __init__(self, *args, **kwargs):
+        self.dynamic = kwargs.pop("dynamic", False)
+        super().__init__(*args, **kwargs)
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
+        It is VERY important to index using a tensor, otherwise you introduce a copy to the device.
+
+        Parameters:
+            key_states (`torch.Tensor`):
+                The new key states to cache.
+            value_states (`torch.Tensor`):
+                The new value states to cache.
+            layer_idx (`int`):
+                The index of the layer to cache the states for.
+            cache_kwargs (`Dict[str, Any]`, `optional`):
+                Additional arguments for the cache subclass. The `StaticCache` needs the `cache_position` input
+                to know how where to write in the cache.
+
+        Return:
+            A tuple containing the updated key and value states.
+        """
+        cache_position = cache_kwargs.get("cache_position")
+        if hasattr(self, "key_cache") and hasattr(self, "value_cache"):
+            if self.key_cache[layer_idx].device != key_states.device:
+                self.key_cache[layer_idx] = self.key_cache[layer_idx].to(key_states.device)
+                self.value_cache[layer_idx] = self.value_cache[layer_idx].to(value_states.device)
+            k_out = self.key_cache[layer_idx]
+            v_out = self.value_cache[layer_idx]
+            key_states = key_states.to(k_out.dtype)
+            value_states = value_states.to(v_out.dtype)
+        else:
+            if self.layers[layer_idx].keys is None:
+                self.layers[layer_idx].lazy_initialization(key_states)
+            k_out = self.layers[layer_idx].keys
+            v_out = self.layers[layer_idx].values
+
+        if cache_position is None:
+            k_out.copy_(key_states)
+            v_out.copy_(value_states)
+        else:
+            # Note: here we use `tensor.index_copy_(dim, index, tensor)` that is equivalent to
+            # `tensor[:, :, index] = tensor`, but the first one is compile-friendly and it does explicitly an in-place
+            # operation, that avoids copies and uses less memory.
+            if cache_position.dim() == 1:
+                k_out.index_copy_(2, cache_position, key_states)
+                v_out.index_copy_(2, cache_position, value_states)
+
+                if self.dynamic:
+                    end = cache_position[-1].item() + 1
+                    k_out = k_out[:, :, :end]
+                    v_out = v_out[:, :, :end]
+            else:
+                assert cache_position.dim() == 2, f"multiple batch dims not yet {cache_position.shape=}"
+                batch_size, idx_size = cache_position.shape
+                assert batch_size == k_out.size(0)
+                assert batch_size == v_out.size(0)
+                assert batch_size == key_states.size(0)
+                assert batch_size == value_states.size(0)
+                for i in range(batch_size):
+                    unbatched_dim = 1
+                    k_out[i].index_copy_(unbatched_dim, cache_position[i], key_states[i])
+                    v_out[i].index_copy_(unbatched_dim, cache_position[i], value_states[i])
+
+                if self.dynamic:
+                    assert len(cache_position) == 1
+                    end = cache_position[0, -1].item() + 1
+                    k_out = k_out[:, :, :end]
+                    v_out = v_out[:, :, :end]
+
+        return k_out, v_out

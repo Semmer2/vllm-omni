@@ -687,12 +687,14 @@ def initialize_model_parallel(
     )
     global _PP
     assert _PP is None, "pipeline model parallel group is already initialized"
+    print("---------init PP-------------")
     _PP = init_model_parallel_group(
         group_ranks=rank_generator.get_ranks("pp"),
         local_rank=get_world_group().local_rank,
         backend=backend,
         parallel_mode="pipeline",
     )
+    vllm_parallel_state._PP = _PP
 
     global _SP
     assert _SP is None, "sequence parallel group is already initialized"
@@ -739,6 +741,9 @@ def initialize_model_parallel(
         backend=backend,
         parallel_mode="expert",
     )
+
+    # add log info
+    # logger.info(....)
 
 
 def destroy_model_parallel():

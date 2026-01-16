@@ -120,19 +120,20 @@ class HunYuanRotary2DEmbedder:
         k: torch.Tensor,
         hidden_states: torch.Tensor,
         custom_pos_emb: tuple[torch.Tensor, torch.Tensor],
-        attn_meta: HunYuanImageAttentionMeta | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if attn_meta is None:
+        if kwargs.get("mode", "gen_text") == "gen_image":
             return q, k
 
-        first_step = attn_meta.first_step
+        first_step = kwargs.get("first_step", False)
         device = q.device
         # 1. Prepare cos/sin
         cos, sin = self._prepare_cos_sin(custom_pos_emb, first_step, device)
 
         # 2. Shape validation
-        bs = len(attn_meta.query_lens)
-        q_len = attn_meta.query_lens[0]
+        query_lens: list[int] = kwargs.get("query_lens")
+        bs = len(query_lens)
+        q_len = query_lens[0]
         assert hidden_states.shape[0] == bs * q_len, (
             f"{hidden_states.shape[0]} != {bs * q_len}"
         )
@@ -275,16 +276,20 @@ class ImageKVCacheManager:
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_metadata: Optional["HunYuanImageAttentionMeta"],  # 前向引用加引号
+        # atten_metadata no longer need
+        # attn_metadata: Optional["HunYuanImageAttentionMeta"],
         attention_mask: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
-        assert attn_metadata is not None, "attn_metadata is required"
-        self.image_token_len = attn_metadata.num_image_tokens
-        first_step = attn_metadata.first_step
+        # assert attn_metadata is not None, "attn_metadata is required"
+        self.image_token_len = kwargs.get("num_image_tokens")
+        first_step = kwargs.get("first_step")
 
-        bs = len(attn_metadata.query_lens)
-        q_len = attn_metadata.query_lens[0]
-        seq_len = attn_metadata.seq_lens[0]
+        query_lens = kwargs.get("query_lens")
+        seq_lens = kwargs.get("seq_lens")
+        bs = len(query_lens)
+        q_len = query_lens[0]
+        seq_len = seq_lens[0]
         assert query.shape[0] == bs * q_len, f"{query.shape[0]} != {bs * q_len}"
 
         head_num_per_rank = query.shape[1]

@@ -30,6 +30,21 @@ class NPUWorker(GPUWorker):
     Inherits from GPUWorker and overrides device-specific initialization.
     """
 
+    def __init__(
+        self,
+        local_rank: int,
+        rank: int,
+        od_config: OmniDiffusionConfig,
+    ):
+        from vllm_ascend.utils import adapt_patch
+        adapt_patch()
+        # Register ops when worker init.
+        from vllm_ascend import ops
+        ops.register_dummy_fusion_op()
+        from vllm_ascend.utils import register_ascend_customop
+        register_ascend_customop()
+        super().__init__(local_rank=local_rank, rank=rank, od_config=od_config)
+
     def init_device_and_model(self) -> None:
         """Initialize the NPU device and load the model."""
         world_size = self.od_config.num_gpus
@@ -56,7 +71,7 @@ class NPUWorker(GPUWorker):
             init_distributed_environment(world_size=world_size, rank=rank)
             logger.info(f"Worker {self.rank}: Initialized device and distributed environment.")
             parallel_config = self.od_config.parallel_config
-            print("NPU worker call ")
+            print("---------NPU worker call ------------")
             initialize_model_parallel(
                 data_parallel_size=parallel_config.data_parallel_size,
                 cfg_parallel_size=parallel_config.cfg_parallel_size,
@@ -66,6 +81,8 @@ class NPUWorker(GPUWorker):
                 tensor_parallel_size=parallel_config.tensor_parallel_size,
                 pipeline_parallel_size=parallel_config.pipeline_parallel_size,
             )
+            from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+            init_ascend_model_parallel(parallel_config)
 
             load_config = LoadConfig()
             model_loader = DiffusersPipelineLoader(load_config)
