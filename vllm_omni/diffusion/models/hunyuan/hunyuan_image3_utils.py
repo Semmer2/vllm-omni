@@ -122,7 +122,7 @@ class HunYuanRotary2DEmbedder:
         custom_pos_emb: tuple[torch.Tensor, torch.Tensor],
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if kwargs.get("mode", "gen_text") == "gen_image":
+        if kwargs.get("mode", "gen_text") != "gen_image":
             return q, k
 
         first_step = kwargs.get("first_step", False)

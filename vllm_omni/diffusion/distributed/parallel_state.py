@@ -767,6 +767,10 @@ def destroy_model_parallel():
         vllm_parallel_state._TP.destroy()
     vllm_parallel_state._TP = None
 
+    if vllm_parallel_state._EP:
+        vllm_parallel_state._EP.destroy()
+    vllm_parallel_state._EP = None
+
     global _PP
     if _PP:
         _PP.destroy()

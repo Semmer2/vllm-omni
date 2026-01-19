@@ -794,7 +794,7 @@ class HunyuanTopKGate(nn.Module):
         self.group_limited_greedy = config.group_limited_greedy
 
     def forward(self, hidden_states, topk_impl='default'):
-        bsz, seq_len, hidden_size = hidden_states.shape
+        hidden_size = hidden_states.shape[-1]
         hidden_states = hidden_states.reshape(-1, hidden_size)
         if self.wg.weight.dtype == torch.float32:
             hidden_states = hidden_states.float()
@@ -1042,6 +1042,7 @@ class HunYuanSparseMoeBlock(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                prefix=f"{prefix}.shared_mlp",
             )
         else:
             self.shared_mlp = None
@@ -1198,12 +1199,21 @@ class HunYuanAttention(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
 
-        bsz, q_len, _ = hidden_states.size()
+        # bsz, q_len, _ = hidden_states.size()
         qkv, _ = self.qkv_proj(hidden_states)
+        # save_weight_heatmap(self.qkv_proj.weight, f"attn_qkv_proj_weight_{self.layer_id}_{str(self.qkv_proj.weight.device)}", True)
+        # save_tensor(qkv, f"E_qkv_{str(qkv.device)}.pt")
+        # ST_qkv_path = f"/home/f00910569/Projects/HunyuanImage-3.0/ST_qkv_{str(qkv.device)}.pt"
+        # print(f"ori qkv shape: {qkv.shape}")
+        # ST_qkv = torch.load(ST_qkv_path).to(qkv.device)
+        # print(f"loaded qkv shape: {ST_qkv.shape}")
+        # qkv = ST_qkv
+        # save_tensor(qkv, f"E_qkv_{str(qkv.device)}.pt")
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         past_key_value: Optional[Cache] = kwargs.get("past_key_value", None)
         if past_key_value is not None:
+            raise NotImplementedError("Not support image kv cache")
             position_ids = kwargs.get("position_ids")
             key_states = k.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
             value_states = v.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -1212,7 +1222,23 @@ class HunYuanAttention(nn.Module):
         # for image_generation
         if kwargs.get("mode", "gen_text") == "gen_image":
             # assert positions is None, "positions should be None for image attention"
+            # save_tensor(custom_pos_emb[0], f"E_cus_pos_emb_0_{str(custom_pos_emb[0].device)}.pt")
+            # save_tensor(custom_pos_emb[1], f"E_cus_pos_emb_1_{str(custom_pos_emb[1].device)}.pt")
+            # ST_cus_pos_emb_0_path = f"/home/f00910569/Projects/HunyuanImage-3.0/ST_cus_pos_emb_0_{str(custom_pos_emb[0].device)}.pt"
+            # ST_custom_pos_emb_0 = torch.load(ST_cus_pos_emb_0_path).to(custom_pos_emb[0].device)
+            # ST_cus_pos_emb_1_path = f"/home/f00910569/Projects/HunyuanImage-3.0/ST_cus_pos_emb_1_{str(custom_pos_emb[1].device)}.pt"
+            # ST_custom_pos_emb_1 = torch.load(ST_cus_pos_emb_1_path).to(custom_pos_emb[1].device)
+            # custom_pos_emb = (ST_custom_pos_emb_0, ST_custom_pos_emb_1)
+            # ST_q_path = f"/home/f00910569/Projects/HunyuanImage-3.0/ST_q_rope_{str(qkv.device)}.pt"
+            # ST_k_path = f"/home/f00910569/Projects/HunyuanImage-3.0/ST_k_rope_{str(qkv.device)}.pt"
+            # ST_q = torch.load(ST_q_path).to(q.device)
+            # ST_k = torch.load(ST_k_path).to(k.device)
+            # q = ST_q
+            # k = ST_k
             q, k = self.image_rope2d_emb(q, k, hidden_states, custom_pos_emb, **kwargs)
+            # save_tensor(q, f"E_q_rope_{str(q.device)}.pt")
+            # save_tensor(k, f"E_k_rope_{str(k.device)}.pt")
+
         else:
             q, k = self.rotary_emb(positions, q, k)
         ori_k = k
@@ -1228,13 +1254,14 @@ class HunYuanAttention(nn.Module):
             attn_output = self.image_attn(
                 q, k, v, attention_mask=attention_mask, **kwargs
             )
+            # save_tensor(attn_output, f"E_attn_output_{str(attn_output.device)}.pt")
         else:
             attn_output = self.attn(q, k, v)
         # For o_proj
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
-        output = output.reshape(bsz, q_len, -1)
-        return output, None, past_key_value
+        # save_tensor(output, f"E_attn_oproj_{str(output.device)}.pt")
+        return output, (ori_k,v)
 
 
 class HunYuanCrossAttention(nn.Module):
@@ -1349,6 +1376,35 @@ class HunYuanCrossAttention(nn.Module):
         return output, (ori_k, v)
 
 
+from vllm_omni.diffusion.data import logger
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+def save_weight_heatmap(weight_tensor: torch.Tensor, title: str, if_save_tensor: bool = False):
+    # 将 Tensor 转换为 numpy 数组
+    # if isinstance(weight_tensor, torch.Tensor):
+    if not isinstance(weight_tensor, torch.Tensor):
+        logger.error(f"Do not support non torch.Tensor input\n will not save {title}")
+        return
+
+    if if_save_tensor:
+        save_tensor(weight_tensor, f"./{title}.pt")
+    data = weight_tensor.detach().cpu().float().numpy()
+    # 如果是多维卷积核，取前两个维度的切片或进行展平处理
+    if data.ndim > 2:
+        print(f"警告: 权重维度为 {data.shape}，已自动切片展示第一层。")
+        data = data[0, 0] if data.ndim == 4 else data[0]
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(data, cmap='viridis', center=0)
+    plt.title(title)
+    save_path = f"./{title}.png"
+    plt.savefig(save_path, bbox_inches='tight', dpi=300)
+    print(f"{save_path} saved")
+    plt.close()
+    # plt.show()
+
+
 class HunyuanImage3DecoderLayer(nn.Module):
     def __init__(self, config: HunyuanImage3Config, layer_idx: int, prefix:str = ""):
         super().__init__()
@@ -1424,8 +1480,10 @@ class HunyuanImage3DecoderLayer(nn.Module):
         if ((isinstance(config.num_experts, int) and config.num_experts > 1) or (
                 isinstance(config.num_experts, list) and max(
                 config.num_experts) > 1)) and layer_idx >= config.moe_layer_num_skipped:
+            # print(f"layer{layer_idx} init MoE")
             self.mlp = HunYuanSparseMoeBlock(config, layer_id=layer_idx, prefix=f"{prefix}.mlp")
         else:
+            # print(f"layer{layer_idx} init linear MLP")
             self.mlp = HunYuanMLP(self.hidden_size, self.intermediate_size,
                                   config.hidden_act)
         if config.norm_type == 'hf_rms' or config.norm_type == 'rms':
@@ -1436,10 +1494,15 @@ class HunyuanImage3DecoderLayer(nn.Module):
             self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             assert False, "other norm_type are not supported"
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
             self,
             hidden_states: torch.Tensor,
+            residual: torch.Tensor | None = None,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
             past_key_value: Optional[Tuple[torch.Tensor]] = None,
@@ -1472,6 +1535,18 @@ class HunyuanImage3DecoderLayer(nn.Module):
                 "`attention_mask` instead.`"
             )
 
+        # ori_shape = hidden_states.shape
+        # bs, sq_len, h_d = ori_shape
+        # print(f"---ori hidden_states: {ori_shape}")
+        # save_tensor(hidden_states, f"E_in_hidden_states_{str(hidden_states.device)}.pt")
+        # TODO, input hidden_states not aligned
+        # hd_path = f"/home/f00910569/Projects/HunyuanImage-3.0/comp/ST_in_hidden_states_{str(hidden_states.device)}.pt"
+        # import os
+        # if os.path.exists(hd_path):
+        #     st_hidden_states = torch.load(hd_path).to(hidden_states.device)
+        #     print(f"---loaded hidden_states: {st_hidden_states.shape}")
+        #     # hidden_states = st_hidden_states.reshape((bs, -1, h_d))
+        #     hidden_states = st_hidden_states
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -1483,33 +1558,38 @@ class HunyuanImage3DecoderLayer(nn.Module):
         #     hidden_states=hidden_states,
         #     kv_states
         # )
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, ori_kv_states = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             custom_pos_emb=custom_pos_emb,
-            past_key_value=past_key_value,
+            past_key_value=None,
             output_attentions=output_attentions,
             use_cache=use_cache,
             **kwargs,
         )
-        print(f"---------residual:{residual.shape}, hidden_states:{hidden_states.shape}")
+        # save_tensor(hidden_states, f"E_hidden_states_attn_{str(hidden_states.device)}.pt")
+        # print(f"---------residual:{residual.shape}, hidden_states:{hidden_states.shape}")
         hidden_states = residual + hidden_states
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+        # save_tensor(hidden_states, f"E_hidden_states_norm_{str(hidden_states.device)}.pt")
         hidden_states = self.mlp(hidden_states)
+        # print(f"mlp out: {hidden_states[0, :5]} device: {str(hidden_states.device)}")
+        # save_tensor(hidden_states, f"E_hidden_states_mlp_{str(hidden_states.device)}.pt")
 
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
+        # outputs = (hidden_states,)
 
-        if output_attentions:
-            outputs += (self_attn_weights,)
+        # if output_attentions:
+        #     outputs += (self_attn_weights,)
 
-        if use_cache:
-            outputs += (present_key_value,)
+        # if use_cache:
+        #     outputs += (present_key_value,)
 
-        return outputs
+        # save_tensor(hidden_states,f"E_out_hidden_states_{str(hidden_states.device)}.pt")
+        return hidden_states, residual, ori_kv_states
 
 
 class HunyuanImage3PreTrainedModel(PreTrainedModel):
@@ -1575,7 +1655,7 @@ class HunyuanImage3Model(nn.Module):
         )
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
-        self.wte = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        # self.wte = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
@@ -1682,15 +1762,13 @@ class HunyuanImage3Model(nn.Module):
         # List of unexpected keywords in weight names
         unexpected_keywords = [
             "vae",
-            "vision_aligner",
             "vision_model",
-            "final_layer",
-            "patch_embed",
+            "vision_aligner",
             "timestep_emb",
+            "patch_embed",
             "time_embed",
             "time_embed_2",
-            "guidance_emb",
-            "timestep_r_emb",
+            "final_layer",
         ]
 
         def contains_unexpected_keyword(name, keywords):
@@ -1905,7 +1983,7 @@ class HunyuanImage3Model(nn.Module):
             gen_timestep_scatter_index: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
-        print("call HunyuanImage3 HunyuanImage3Model forward")
+        # print("call HunyuanImage3 HunyuanImage3Model forward")
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -1915,10 +1993,21 @@ class HunyuanImage3Model(nn.Module):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if inputs_embeds is None:
-            inputs_embeds = self.wte(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids)
+        save_tensor(inputs_embeds, "./E_in_hidden_states.pt")
 
+        ori_shape = inputs_embeds.shape
         # embed positions
-        hidden_states = inputs_embeds
+        hidden_states = inputs_embeds.reshape(-1, ori_shape[-1])
+
+        # save_tensor(hidden_states, "./E_hidden_states.pt")
+        # hd_path = f"/home/f00910569/Projects/HunyuanImage-3.0/comp/ST_in_hidden_states_{str(hidden_states.device)}.pt"
+        # import os
+        # if os.path.exists(hd_path):
+        #     st_hidden_states = torch.load(hd_path).to(hidden_states.device)
+        #     print(f"---loaded hidden_states: {st_hidden_states.shape}")
+        #     # hidden_states = st_hidden_states.reshape((bs, -1, h_d))
+        #     hidden_states = st_hidden_states
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -1955,11 +2044,14 @@ class HunyuanImage3Model(nn.Module):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-        if not self.add_classification_head:
-            # Do ln_f outside of the model for compatibility with image generation.
-            pass
+            save_tensor(hidden_states, f"E_decoder_layer_{layer_idx}_{str(hidden_states.device)}.pt")
+
+        # if not self.add_classification_head:
+        #     # Do ln_f outside of the model for compatibility with image generation.
+        #     pass
             # hidden_states = self.ln_f(hidden_states)
 
+        hidden_states = hidden_states.reshape(ori_shape)
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
@@ -2462,6 +2554,11 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     return noise_cfg
 
 
+def save_tensor(tensor: torch.Tensor, filename: str):
+    torch.save(tensor.detach().cpu(), filename)
+    print(f"{filename} saved")
+
+
 class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
     r"""
     Pipeline for condition-to-sample generation using Stable Diffusion.
@@ -2694,7 +2791,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
                 otherwise a `tuple` is returned where the first element is a list with the generated samples.
         """
 
-        print("call HunyuanImage3 HunyuanImage3Text2ImagePipeline forward")
+        # print("call HunyuanImage3 HunyuanImage3Text2ImagePipeline forward")
         callback_steps = kwargs.pop("callback_steps", None)
         pbar_steps = kwargs.pop("pbar_steps", None)
 
@@ -2732,6 +2829,10 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
 
         # Prepare model kwargs
         input_ids = model_kwargs.pop("input_ids")
+        # save_tensor(input_ids, "./E_input_ids.pt")
+        id_path = f"/home/f00910569/Projects/HunyuanImage-3.0/ST_input_ids.pt"
+        ST_input_ids = torch.load(id_path).to(input_ids.device)
+        input_ids = ST_input_ids
         attention_mask = self.model._prepare_attention_mask_for_generation(     # noqa
             input_ids, self.model.generation_config, model_kwargs=model_kwargs,
         )
@@ -2764,6 +2865,9 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
                 with torch.autocast(device_type="npu", dtype=torch.bfloat16, enabled=True):
                     model_output = self.model.forward_call(**model_inputs, first_step=(i == 0))
                     pred = model_output["diffusion_prediction"]
+                tp_rank = get_tensor_model_parallel_rank()
+                pred_filename = f"./pred_step{i}_tp{tp_rank}.pt"
+                # save_tensor(pred, pred_filename)
                 pred = pred.to(dtype=torch.float32)
 
                 # perform guidance
@@ -2777,6 +2881,8 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(pred, t, latents, **_scheduler_step_extra_kwargs, return_dict=False)[0]
+                latents_filename = f"./latents_step{i}_tp{tp_rank}.pt"
+                # save_tensor(latents, latents_filename)
 
                 if i != len(timesteps) - 1:
                     model_kwargs = self.model._update_model_kwargs_for_generation(  # noqa
@@ -2785,6 +2891,12 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
                     )
                     if input_ids.shape[1] != model_kwargs["position_ids"].shape[1]:
                         input_ids = torch.gather(input_ids, 1, index=model_kwargs["position_ids"])
+                    attention_mask = model_kwargs.get("attention_mask")
+                    b, _, q_len1, seq_len = attention_mask.shape
+                    query_lens=[q_len1] * b
+                    seq_lens=[seq_len] * b
+                    model_kwargs["query_lens"] = query_lens
+                    model_kwargs["seq_lens"] = seq_lens
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -3389,7 +3501,11 @@ class HunyuanStaticCache(StaticCache):
             k_out = self.layers[layer_idx].keys
             v_out = self.layers[layer_idx].values
 
+        if k_out.shape != key_states.shape:
+            print("cache tensor not equal!")
+
         if cache_position is None:
+            # print(f"----updating static cache: key_states: {key_states.shape.shape}, k_out: {k_out.shape}, value_states: {value_states.shape}, v_out: {v_out.shape}")
             k_out.copy_(key_states)
             v_out.copy_(value_states)
         else:

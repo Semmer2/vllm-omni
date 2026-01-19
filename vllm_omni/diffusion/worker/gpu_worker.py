@@ -136,7 +136,12 @@ class GPUWorker:
         # Refresh cache context if needed
         if self.cache_backend is not None and self.cache_backend.is_enabled():
             self.cache_backend.refresh(self.pipeline, req.num_inference_steps)
-        with set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config):
+
+        from vllm_ascend.ascend_forward_context import MoECommType, set_ascend_forward_context
+        with (
+            set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config),
+            set_ascend_forward_context(None, vllm_config=self.vllm_config, moe_comm_type=MoECommType.ALLGATHER)
+        ):
             output = self.pipeline.forward(req)
         return output
 
