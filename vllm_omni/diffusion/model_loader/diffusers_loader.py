@@ -13,6 +13,7 @@ from torch import nn
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -204,6 +205,7 @@ class DiffusersPipelineLoader:
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model)
+            process_weights_after_loading(model, None, torch.device(load_device))
         return model.eval()
 
     def load_weights(self, model: nn.Module) -> None:

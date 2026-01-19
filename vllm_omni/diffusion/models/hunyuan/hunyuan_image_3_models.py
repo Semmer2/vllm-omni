@@ -1040,6 +1040,7 @@ class HunYuanSparseMoeBlock(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                prefix=f"{prefix}.shared_mlp",
             )
         else:
             self.shared_mlp = None
@@ -1490,7 +1491,7 @@ class HunyuanImage3DecoderLayer(nn.Module):
             use_cache=use_cache,
             **kwargs,
         )
-        print(f"---------residual:{residual.shape}, hidden_states:{hidden_states.shape}")
+        # print(f"---------residual:{residual.shape}, hidden_states:{hidden_states.shape}")
         hidden_states = residual + hidden_states
         # Fully Connected
         residual = hidden_states
@@ -1953,9 +1954,9 @@ class HunyuanImage3Model(nn.Module):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-        if not self.add_classification_head:
-            # Do ln_f outside of the model for compatibility with image generation.
-            pass
+        # if not self.add_classification_head:
+        #     # Do ln_f outside of the model for compatibility with image generation.
+        #     pass
             # hidden_states = self.ln_f(hidden_states)
 
         # add hidden states from the last decoder layer
@@ -2783,6 +2784,12 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
                     )
                     if input_ids.shape[1] != model_kwargs["position_ids"].shape[1]:
                         input_ids = torch.gather(input_ids, 1, index=model_kwargs["position_ids"])
+                    attention_mask = model_kwargs.get("attention_mask")
+                    b, _, q_len1, seq_len = attention_mask.shape
+                    query_lens=[q_len1] * b
+                    seq_lens=[seq_len] * b
+                    model_kwargs["query_lens"] = query_lens
+                    model_kwargs["seq_lens"] = seq_lens
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -3387,7 +3394,11 @@ class HunyuanStaticCache(StaticCache):
             k_out = self.layers[layer_idx].keys
             v_out = self.layers[layer_idx].values
 
+        if k_out.shape != key_states.shape:
+            print("cache tensor not equal!")
+
         if cache_position is None:
+            # print(f"----updating static cache: key_states: {key_states.shape.shape}, k_out: {k_out.shape}, value_states: {value_states.shape}, v_out: {v_out.shape}")
             k_out.copy_(key_states)
             v_out.copy_(value_states)
         else:

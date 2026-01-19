@@ -48,6 +48,11 @@ _OMNI_MODELS = {
         "qwen3_omni_code2wav",
         "Qwen3OmniMoeCode2Wav",
     ),
+    "HunyuanImage3ForCausalMM": (
+        "dummy_model",
+        "dummy_model",
+        "DummyModel",
+    )
 }
 
 _VLLM_OMNI_MODELS = {

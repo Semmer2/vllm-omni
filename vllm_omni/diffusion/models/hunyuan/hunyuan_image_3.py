@@ -6,8 +6,9 @@ import torch.nn as nn
 
 from transformers.generation.logits_process import LogitsProcessorList
 from transformers.generation.stopping_criteria import StoppingCriteriaList
-from transformers.generation.utils import GenerationConfig, GenerationMixin
+from transformers.generation.utils import GenerationConfig, GenerationMixin, ALL_CACHE_NAMES
 from transformers.modeling_utils import PreTrainedModel
+from transformers.utils import ModelOutput
 from transformers.integrations.accelerate import init_empty_weights
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.request import OmniDiffusionRequest
@@ -103,7 +104,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             out_channels=self.hf_config.vae["latent_channels"],
             out_norm=True,
         )
-        self.time_embed2 = TimestepEmbedder(hidden_size=self.hf_config.hidden_size)
+        self.time_embed_2 = TimestepEmbedder(hidden_size=self.hf_config.hidden_size)
         self.lm_head = nn.Linear(self.hf_config.hidden_size, self.hf_config.vocab_size, bias=False)
         self.vllm_config = get_current_vllm_config()
         self.post_init()
@@ -504,7 +505,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         model_input_kwargs = dict(
             input_ids=output.tokens.to(device),
             position_ids=batch_input_pos,
-            past_key_values=cache,
+            past_key_values=None,
             custom_pos_emb=(cos, sin),
             mode=mode,
             image_mask=to_device(output.gen_image_mask, device),
@@ -590,6 +591,68 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         )
         return model_inputs
 
+    def _update_model_kwargs_for_generation(
+        self,
+        outputs: ModelOutput,
+        model_kwargs: Dict[str, Any],
+        is_encoder_decoder: bool = False,
+        num_new_tokens: int = 1,
+    ) -> Dict[str, Any]:
+        mode = model_kwargs["mode"]
+
+        updated_model_kwargs = {
+            "mode": mode,
+            "custom_pos_emb": model_kwargs["custom_pos_emb"],
+        }
+
+        # update past_key_values keeping its naming used in model code
+        for possible_cache_name in ALL_CACHE_NAMES:
+            if possible_cache_name in outputs:
+                # TODO (joao): remove output/input mismatch when these old models (xlnet, reformer) are deprecated
+                if possible_cache_name in ("past_buckets_states", "mems"):
+                    cache_name = "past_key_values"
+                else:
+                    cache_name = possible_cache_name
+                updated_model_kwargs[cache_name] = getattr(outputs, possible_cache_name)
+                break
+
+        if "tokenizer_output" in model_kwargs:
+            if mode == "gen_text":
+                # When enable batching, we use right padding, which requires a real_pos to index the valid
+                # end position of the sequence. If tokenizer_output in model_kwargs, it means we are in the
+                # prefill step of generation.
+                real_pos = to_device(model_kwargs["tokenizer_output"].real_pos, self.device)
+                updated_model_kwargs["position_ids"] = real_pos
+            else:
+                # position ids
+                image_mask = model_kwargs["image_mask"]
+                bsz, seq_len = image_mask.shape
+                index = torch.arange(seq_len, device=image_mask.device).unsqueeze(0).repeat(bsz, 1)
+                position_ids = index.masked_select(image_mask.bool()).reshape(bsz, -1)
+                timestep_position_ids = \
+                    index[torch.arange(bsz), model_kwargs["gen_timestep_scatter_index"][:, -1]].unsqueeze(-1)
+                updated_model_kwargs["position_ids"] = torch.cat([timestep_position_ids, position_ids], dim=1)
+
+                # attention mask
+                mask_list = []
+                for attention_mask_i, position_ids_i in zip(
+                        model_kwargs["attention_mask"], updated_model_kwargs["position_ids"]):
+                    mask_list.append(torch.index_select(attention_mask_i, dim=1, index=position_ids_i.reshape(-1)))
+                attention_mask = torch.stack(mask_list, dim=0)
+                updated_model_kwargs["attention_mask"] = attention_mask
+                updated_model_kwargs["gen_timestep_scatter_index"] = model_kwargs["gen_timestep_scatter_index"]
+
+        else:
+            if mode == "gen_text":
+                # Now we are in the decode steps.
+                updated_model_kwargs["position_ids"] = model_kwargs["position_ids"] + 1
+            else:
+                updated_model_kwargs["position_ids"] = model_kwargs["position_ids"]
+                updated_model_kwargs["attention_mask"] = model_kwargs["attention_mask"]
+                updated_model_kwargs["gen_timestep_scatter_index"] = model_kwargs["gen_timestep_scatter_index"]
+
+        return updated_model_kwargs
+
     def _generate(
             self,
             inputs: Optional[torch.Tensor] = None,
@@ -628,16 +691,16 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             )
             kwargs["num_image_tokens"] = num_image_tokens
             # 50 and 5.0 hard code
-            from vllm.forward_context import set_forward_context
-            with set_forward_context(None, self.vllm_config):
-                results = self.pipeline(
-                    batch_size=len(batch_gen_image_info),
-                    image_size=[batch_gen_image_info[0].image_height, batch_gen_image_info[0].image_width],
-                    num_inference_steps=kwargs.get("diff_infer_steps", 50),
-                    guidance_scale=kwargs.get("diff_guidance_scale", 5.0),
-                    generator=generator,
-                    model_kwargs=kwargs,
-                )
+            # from vllm.forward_context import set_forward_context
+            # with set_forward_context(None, self.vllm_config):
+            results = self.pipeline(
+                batch_size=len(batch_gen_image_info),
+                image_size=[batch_gen_image_info[0].image_height, batch_gen_image_info[0].image_width],
+                num_inference_steps=kwargs.get("diff_infer_steps", 50),
+                guidance_scale=kwargs.get("diff_guidance_scale", 5.0),
+                generator=generator,
+                model_kwargs=kwargs,
+            )
             samples = results[0]
             return samples
 
