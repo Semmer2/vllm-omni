@@ -50,8 +50,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm_omni.diffusion.distributed.parallel_state import get_pp_group
 
-from mindiesd import rotary_position_embedding
-
 from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
@@ -2761,7 +2759,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
                     **model_kwargs,
                 )
 
-                with torch.autocast(device_type="npu", dtype=torch.bfloat16, enabled=True):
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                     model_output = self.model.forward_call(**model_inputs, first_step=(i == 0))
                     pred = model_output["diffusion_prediction"]
                 pred = pred.to(dtype=torch.float32)
@@ -2808,7 +2806,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
 
         # torch.cuda.synchronize()
         # t_vae_s = time.time()
-        with torch.autocast(device_type="npu", dtype=torch.float16, enabled=True):
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
             image = self.vae.decode(latents, return_dict=False, generator=generator)[0]
 
         # torch.cuda.synchronize()

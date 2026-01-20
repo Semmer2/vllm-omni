@@ -130,6 +130,14 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         )
         return loader.load_weights(weights)
 
+    def prepare_seed(self, seed=None, batch_size=1):
+        #random seed
+        if seed is not None:
+            return [seed + i for i in range(batch_size)]
+        else:
+            import random
+            return [random.randint(0, 2**32 - 1) for _ in range(batch_size)]
+        
     @property
     def pipeline(self):
         if self._pipeline is None:
