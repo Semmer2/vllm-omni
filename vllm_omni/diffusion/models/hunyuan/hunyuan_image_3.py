@@ -671,7 +671,6 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             **kwargs,
     ):
         mode = kwargs.get("mode", "gen_text")
-        print("call HunyuanImage3 HunyuanImage3ForCausalMM _generate")
 
         # verbose > 1 not support
 
@@ -691,16 +690,16 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             )
             kwargs["num_image_tokens"] = num_image_tokens
             # 50 and 5.0 hard code
-            # from vllm.forward_context import set_forward_context
-            # with set_forward_context(None, self.vllm_config):
-            results = self.pipeline(
-                batch_size=len(batch_gen_image_info),
-                image_size=[batch_gen_image_info[0].image_height, batch_gen_image_info[0].image_width],
-                num_inference_steps=kwargs.get("diff_infer_steps", 50),
-                guidance_scale=kwargs.get("diff_guidance_scale", 5.0),
-                generator=generator,
-                model_kwargs=kwargs,
-            )
+            from vllm.forward_context import set_forward_context
+            with set_forward_context(None, self.vllm_config):
+                results = self.pipeline(
+                    batch_size=len(batch_gen_image_info),
+                    image_size=[batch_gen_image_info[0].image_height, batch_gen_image_info[0].image_width],
+                    num_inference_steps=kwargs.get("diff_infer_steps", 50),
+                    guidance_scale=kwargs.get("diff_guidance_scale", 5.0),
+                    generator=generator,
+                    model_kwargs=kwargs,
+                )
             samples = results[0]
             return samples
 
@@ -743,7 +742,6 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             seq_lens: Optional[list[int]] = None,
             num_image_tokens: Optional[int] = None,
     ) -> Union[Tuple, CausalMMOutputWithPast]:
-        print("call HunyuanImage3 HunyuanImage3ForCausalMM forward")
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         # Sanity Check of Inputs
         self._check_inputs(mode == "gen_image", "in `gen_image` mode", [

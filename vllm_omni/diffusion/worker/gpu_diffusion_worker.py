@@ -13,7 +13,7 @@ from contextlib import AbstractContextManager, nullcontext
 
 import torch
 import zmq
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, ModelConfig, set_current_vllm_config
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.logger import init_logger
 from vllm.utils.mem_utils import GiB_bytes
@@ -77,15 +77,22 @@ class GPUDiffusionWorker:
         # Setup device
         self.device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(self.device)
+        from vllm.transformers_utils.config import get_config
+        vllm_model_config = ModelConfig(
+            model=self.od_config.model,
+            tokenizer=self.od_config.model,
+            hf_config=get_config(self.od_config.model, trust_remote_code=True),
+            trust_remote_code=True,
+        )
+        # Create vllm_config for parallel configuration
+        vllm_config = VllmConfig(model_config=vllm_model_config)
 
         # Create vllm_config for parallel configuration
-        vllm_config = VllmConfig()
         vllm_config.parallel_config.tensor_parallel_size = self.od_config.parallel_config.tensor_parallel_size
         vllm_config.parallel_config.data_parallel_size = self.od_config.parallel_config.data_parallel_size
         self.vllm_config = vllm_config
-
-        # Initialize distributed environment
-        with set_forward_context(vllm_config=vllm_config, omni_diffusion_config=self.od_config):
+        with (set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config),
+              set_current_vllm_config(self.vllm_config)):
             init_distributed_environment(world_size=world_size, rank=rank)
             logger.info(f"Worker {self.rank}: Initialized device and distributed environment.")
 
@@ -100,15 +107,15 @@ class GPUDiffusionWorker:
                 pipeline_parallel_size=parallel_config.pipeline_parallel_size,
             )
 
-        # Create model runner and load model
-        self.model_runner = GPUDiffusionModelRunner(
-            vllm_config=self.vllm_config,
-            od_config=self.od_config,
-            device=self.device,
-        )
-        self.model_runner.load_model(
-            memory_pool_context_fn=self._maybe_get_memory_pool_context,
-        )
+            # Create model runner and load model
+            self.model_runner = GPUDiffusionModelRunner(
+                vllm_config=self.vllm_config,
+                od_config=self.od_config,
+                device=self.device,
+            )
+            self.model_runner.load_model(
+                memory_pool_context_fn=self._maybe_get_memory_pool_context,
+            )
         logger.info(f"Worker {self.rank}: Initialization complete.")
 
     def generate(self, requests: list[OmniDiffusionRequest]) -> DiffusionOutput:

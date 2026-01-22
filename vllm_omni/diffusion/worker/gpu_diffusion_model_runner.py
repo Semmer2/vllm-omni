@@ -15,7 +15,7 @@ from collections.abc import Iterable
 from contextlib import nullcontext
 
 import torch
-from vllm.config import LoadConfig
+from vllm.config import LoadConfig, ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.mem_utils import DeviceMemoryProfiler, GiB_bytes
 
@@ -77,19 +77,28 @@ class GPUDiffusionModelRunner:
                 return memory_pool_context_fn(tag="weights")
             return nullcontext()
 
-        # Load model within forward context
-        with set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config):
-            load_config = LoadConfig()
-            model_loader = DiffusersPipelineLoader(load_config)
-            time_before_load = time.perf_counter()
+        from vllm.transformers_utils.config import get_config
+        vllm_model_config = ModelConfig(
+            model=self.od_config.model,
+            tokenizer=self.od_config.model,
+            hf_config=get_config(self.od_config.model, trust_remote_code=True),
+            trust_remote_code=True,
+        )
+        # Create vllm_config for parallel configuration
+        self.vllm_config = VllmConfig(model_config=vllm_model_config)
 
-            with get_memory_context():
-                with DeviceMemoryProfiler() as m:
-                    self.pipeline = model_loader.load_model(
-                        od_config=self.od_config,
-                        load_device=load_device,
-                    )
-            time_after_load = time.perf_counter()
+        # Load model within forward context
+        load_config = LoadConfig()
+        model_loader = DiffusersPipelineLoader(load_config)
+        time_before_load = time.perf_counter()
+
+        with get_memory_context():
+            with DeviceMemoryProfiler() as m:
+                self.pipeline = model_loader.load_model(
+                    od_config=self.od_config,
+                    load_device=load_device,
+                )
+        time_after_load = time.perf_counter()
 
         logger.info(
             "Model loading took %.4f GiB and %.6f seconds",
@@ -158,7 +167,9 @@ class GPUDiffusionModelRunner:
         # Refresh cache context if needed
         if self.cache_backend is not None and self.cache_backend.is_enabled():
             self.cache_backend.refresh(self.pipeline, req.num_inference_steps)
+        
 
+        from vllm.forward_context import set_forward_context as set_forward_context_vllm
         with set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config):
             output = self.pipeline.forward(req)
 
