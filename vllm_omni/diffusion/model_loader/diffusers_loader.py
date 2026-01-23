@@ -205,7 +205,6 @@ class DiffusersPipelineLoader:
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model)
-            process_weights_after_loading(model, None, torch.device(load_device))
         return model.eval()
 
     def load_weights(self, model: nn.Module) -> None:

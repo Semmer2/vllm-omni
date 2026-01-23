@@ -77,16 +77,6 @@ class GPUDiffusionModelRunner:
                 return memory_pool_context_fn(tag="weights")
             return nullcontext()
 
-        from vllm.transformers_utils.config import get_config
-        vllm_model_config = ModelConfig(
-            model=self.od_config.model,
-            tokenizer=self.od_config.model,
-            hf_config=get_config(self.od_config.model, trust_remote_code=True),
-            trust_remote_code=True,
-        )
-        # Create vllm_config for parallel configuration
-        self.vllm_config = VllmConfig(model_config=vllm_model_config)
-
         # Load model within forward context
         load_config = LoadConfig()
         model_loader = DiffusersPipelineLoader(load_config)

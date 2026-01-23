@@ -13,7 +13,7 @@ from contextlib import AbstractContextManager, nullcontext
 
 import torch
 import zmq
-from vllm.config import VllmConfig, ModelConfig, set_current_vllm_config
+from vllm.config import VllmConfig, CompilationConfig, set_current_vllm_config
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.logger import init_logger
 from vllm.utils.mem_utils import GiB_bytes
@@ -77,15 +77,8 @@ class GPUDiffusionWorker:
         # Setup device
         self.device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(self.device)
-        from vllm.transformers_utils.config import get_config
-        vllm_model_config = ModelConfig(
-            model=self.od_config.model,
-            tokenizer=self.od_config.model,
-            hf_config=get_config(self.od_config.model, trust_remote_code=True),
-            trust_remote_code=True,
-        )
         # Create vllm_config for parallel configuration
-        vllm_config = VllmConfig(model_config=vllm_model_config)
+        vllm_config = VllmConfig(compilation_config=CompilationConfig)
 
         # Create vllm_config for parallel configuration
         vllm_config.parallel_config.tensor_parallel_size = self.od_config.parallel_config.tensor_parallel_size
