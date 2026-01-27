@@ -973,10 +973,6 @@ class HunYuanSparseMoeBlock(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-
-        self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
-        self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
         if self.tp_size > config.num_experts:
@@ -1002,20 +998,9 @@ class HunYuanSparseMoeBlock(nn.Module):
                 else config.moe_intermediate_size[layer_id]
             )
 
-        # Load balancing settings.
-        # vllm_config = get_current_vllm_config()
-        # eplb_config = vllm_config.parallel_config.eplb_config
-        # 
         self.enable_eplb = False
-
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = 0
-        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         self.gate = ReplicatedLinear(
             config.hidden_size,
@@ -1722,6 +1707,8 @@ class HunyuanImage3Model(nn.Module):
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
+                # if scale_name not in params_dict.keys():
+                #     continue
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -1749,7 +1736,8 @@ class HunyuanImage3Model(nn.Module):
 
                 if is_pp_missing_parameter(name, self):
                     continue
-
+                # if name not in params_dict.keys():
+                #     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -1780,7 +1768,8 @@ class HunyuanImage3Model(nn.Module):
 
                 assert loaded_weight.shape[0] % den == 0
                 units = loaded_weight.shape[0] // den
-
+                # if name not in params_dict.keys():
+                #     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 offset = 0
@@ -1834,6 +1823,8 @@ class HunyuanImage3Model(nn.Module):
                     #     print(f"name_mapped: {name_mapped}, found_num: {found_num}")
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
+                    # if name_mapped not in params_dict.keys():
+                    #     continue
                     param = params_dict[name_mapped]
                     # We should ask the weight loader to return success or not
                     # here since otherwise we may skip experts with other
@@ -1878,6 +1869,8 @@ class HunyuanImage3Model(nn.Module):
                     name = "norm.weight"
                 if name == "wte.weight":
                     name = "embed_tokens.weight"
+                # if name not in params_dict.keys():
+                #     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
