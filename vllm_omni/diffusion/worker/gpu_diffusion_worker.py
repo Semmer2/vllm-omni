@@ -78,7 +78,7 @@ class GPUDiffusionWorker:
         self.device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(self.device)
         # Create vllm_config for parallel configuration
-        vllm_config = VllmConfig(compilation_config=CompilationConfig)
+        vllm_config = VllmConfig(compilation_config=CompilationConfig())
 
         # Create vllm_config for parallel configuration
         vllm_config.parallel_config.tensor_parallel_size = self.od_config.parallel_config.tensor_parallel_size
