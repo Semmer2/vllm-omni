@@ -175,6 +175,18 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+from safetensors.torch import load_file
+import os
+import glob
+def get_full_state_dict(model_path):
+    # 查找所有的 safetensors 文件
+    files = glob.glob(os.path.join(model_path, "*.safetensors"))
+    full_sd = {}
+    for f in files:
+        full_sd.update(load_file(f))
+    return full_sd
+
+
 # 3. custom attention impl.
 class ImageKVCacheManager:
     """

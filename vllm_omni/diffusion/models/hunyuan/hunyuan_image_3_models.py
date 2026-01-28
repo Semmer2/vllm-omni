@@ -1994,7 +1994,7 @@ class HunyuanImage3Model(nn.Module):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-        save_tensor(inputs_embeds, "./E_in_hidden_states.pt")
+        # save_tensor(inputs_embeds, "./E_in_hidden_states.pt")
 
         ori_shape = inputs_embeds.shape
         # embed positions
@@ -2044,7 +2044,7 @@ class HunyuanImage3Model(nn.Module):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
-            save_tensor(hidden_states, f"E_decoder_layer_{layer_idx}_{str(hidden_states.device)}.pt")
+            # save_tensor(hidden_states, f"E_decoder_layer_{layer_idx}_{str(hidden_states.device)}.pt")
 
         # if not self.add_classification_head:
         #     # Do ln_f outside of the model for compatibility with image generation.
@@ -2830,9 +2830,9 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
         # Prepare model kwargs
         input_ids = model_kwargs.pop("input_ids")
         # save_tensor(input_ids, "./E_input_ids.pt")
-        id_path = f"/home/f00910569/Projects/HunyuanImage-3.0/ST_input_ids.pt"
-        ST_input_ids = torch.load(id_path).to(input_ids.device)
-        input_ids = ST_input_ids
+        # id_path = f"/home/f00910569/Projects/HunyuanImage-3.0/ST_input_ids.pt"
+        # ST_input_ids = torch.load(id_path).to(input_ids.device)
+        # input_ids = ST_input_ids
         attention_mask = self.model._prepare_attention_mask_for_generation(     # noqa
             input_ids, self.model.generation_config, model_kwargs=model_kwargs,
         )
