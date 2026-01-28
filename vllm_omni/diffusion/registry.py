@@ -106,14 +106,12 @@ def initialize_model(
         model = model_class(od_config=od_config)
         # Configure VAE memory optimization settings from config
         if hasattr(model.vae, "use_slicing"):
-            # vae_use_slicing = true?
             model.vae.use_slicing = od_config.vae_use_slicing
         if hasattr(model.vae, "use_tiling"):
             model.vae.use_tiling = od_config.vae_use_tiling
 
         return model
     else:
-        # improper error info
         raise ValueError(f"Model class {od_config.model_class_name} not found in diffusion model registry.")
 
 

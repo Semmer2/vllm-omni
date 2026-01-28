@@ -55,7 +55,6 @@ class NPUWorker:
         rank = self.rank
         # Set environment variables for distributed initialization
         os.environ["MASTER_ADDR"] = "localhost"
-        print(f"-------{self.od_config.master_port}------")
         os.environ["MASTER_PORT"] = str(self.od_config.master_port)
         os.environ["LOCAL_RANK"] = str(self.local_rank)
         os.environ["RANK"] = str(rank)
@@ -65,14 +64,7 @@ class NPUWorker:
         torch.npu.set_device(device)
 
         # hack
-        from vllm.transformers_utils.config import get_config
-        vllm_model_config = ModelConfig(
-            model=self.od_config.model,
-            tokenizer=self.od_config.model,
-            hf_config=get_config(self.od_config.model, trust_remote_code=True),
-            trust_remote_code=True,
-        )
-        vllm_config = VllmConfig(model_config=vllm_model_config)
+        vllm_config = VllmConfig()
         vllm_config.parallel_config.tensor_parallel_size = self.od_config.parallel_config.tensor_parallel_size
         vllm_config.parallel_config.data_parallel_size = self.od_config.parallel_config.data_parallel_size
         self.vllm_config = vllm_config
@@ -80,7 +72,6 @@ class NPUWorker:
             init_distributed_environment(world_size=world_size, rank=rank)
             logger.info(f"Worker {self.rank}: Initialized device and distributed environment.")
             parallel_config = self.od_config.parallel_config
-            print("---------NPU worker call ------------")
             initialize_model_parallel(
                 data_parallel_size=parallel_config.data_parallel_size,
                 cfg_parallel_size=parallel_config.cfg_parallel_size,
@@ -90,16 +81,6 @@ class NPUWorker:
                 tensor_parallel_size=parallel_config.tensor_parallel_size,
                 pipeline_parallel_size=parallel_config.pipeline_parallel_size,
             )
-            from vllm.distributed.parallel_state import init_distributed_environment as vllm_init_distributed_environment
-            from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
-            vllm_init_distributed_environment(
-                    world_size=world_size,
-                    rank=rank,
-                    local_rank=self.local_rank,
-                    backend="hccl",
-                )
-            setattr(parallel_config, "prefill_context_parallel_size", 1)
-            init_ascend_model_parallel(parallel_config)
 
             load_config = LoadConfig()
             model_loader = DiffusersPipelineLoader(load_config)

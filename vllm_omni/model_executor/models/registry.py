@@ -47,7 +47,7 @@ _OMNI_MODELS = {
         "qwen3_omni",
         "qwen3_omni_code2wav",
         "Qwen3OmniMoeCode2Wav",
-    )
+    ),
 }
 
 _VLLM_OMNI_MODELS = {
