@@ -109,7 +109,72 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         self.vllm_config = get_current_vllm_config()
         self.post_init()
 
+    @staticmethod
+    def _create_selective_device_map():
+        device_map = {}
+
+        # call vllm transformer_blocks, filter hf weights loading.
+        device_map["model.layers"] = "cpu"
+
+        # others keep on cuda:0
+        device_map["vae"] = "cuda:0"
+        device_map["vision_model"] = "cuda:0"
+        device_map["vision_aligner"] = "cuda:0"
+        device_map["timestep_emb"] = "cuda:0"
+        device_map["patch_embed"] = "cuda:0"
+        device_map["time_embed"] = "cuda:0"
+        device_map["time_embed_2"] = "cuda:0"
+        device_map["final_layer.model"] = "cuda:0"
+        device_map["model.wte"] = "cuda:0"
+        device_map["model.ln_f"] = "cuda:0"
+        device_map["lm_head"] = "cuda:0"
+
+        return device_map
+
+    @classmethod
+    def load_multi_moda(cls, path):
+        device_map = cls._create_selective_device_map()
+        kwargs = dict(
+            attn_implementation="sdpa",
+            torch_dtype="auto",
+            device_map=device_map,
+            moe_impl="eager",
+            low_cpu_mem_usage=True,
+        )
+
+        model = cls.from_pretrained(path, **kwargs)
+        model.load_tokenizer(path)
+        print("layer device_map:")
+        print(model.hf_device_map)
+
+        return model, model.tokenizer
+
+    def pre_load(self):
+        from .hunyuan_image3_utils import get_full_state_dict
+        from vllm.distributed import get_tensor_model_parallel_rank
+        tp_rank = get_tensor_model_parallel_rank()
+        print(f"pre load rank:{tp_rank}")
+        state_dict = get_full_state_dict(self.od_config.model)
+        non_layer_prefixes = [
+            "vae", "vision_model", "vision_aligner", "lm_head",
+            "patch_embed", "timestep_emb", "model.wte", "model.ln_f",
+            "time_embed", "time_embed_2", "final_layer.model"
+        ]
+        filtered_sd = {}
+        for k, v in state_dict.items():
+            if any(k.startswith(prefix) for prefix in non_layer_prefixes):
+                filtered_sd[k] = v
+
+        missing, unexpected = self.load_state_dict(filtered_sd, strict=False)
+
+        for prefix in non_layer_prefixes:
+            if hasattr(self, prefix.split('.')[0]):
+                module = dict(self.named_modules()).get(prefix)
+                if module:
+                    module.to(f"cuda:{tp_rank}")
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        self.pre_load()
         skip_prefixes = ["lm_head."] if self.hf_config.tie_word_embeddings else []
         # List of unexpected keywords in weight names
         unexpected_keywords = [
@@ -823,6 +888,9 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         else:
             logits = None
             hidden_states = hidden_states.to(input_ids.device)
+            assert hidden_states.numel() == bsz * seq_len * n_embd, \
+                f"Shape mismatch: {hidden_states.shape} cannot reshape to ({bsz}, {seq_len}, {n_embd})"
+            hidden_states = hidden_states.reshape(bsz, seq_len, n_embd)
             diffusion_prediction = self.ragged_final_layer(
                 hidden_states, image_mask, timestep, token_h, token_w, first_step)
 

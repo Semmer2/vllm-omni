@@ -5,6 +5,17 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+import os
+import glob
+from safetensors.torch import load_file
+
+
+def get_full_state_dict(model_path):
+    files = glob.glob(os.path.join(model_path, "*.safetensors"))
+    full_sd = {}
+    for f in files:
+        full_sd.update(load_file(f))
+    return full_sd
 
 
 # 1. custom attention meta.
@@ -122,7 +133,9 @@ class HunYuanRotary2DEmbedder:
         custom_pos_emb: tuple[torch.Tensor, torch.Tensor],
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if kwargs.get("mode", "gen_text") == "gen_image":
+        hidden_states_shape=hidden_states.shape
+        hidden_states=hidden_states.reshape(-1,hidden_states_shape[-1])
+        if kwargs.get("mode", "gen_text") != "gen_image":
             return q, k
 
         first_step = kwargs.get("first_step", False)
@@ -157,7 +170,7 @@ class HunYuanRotary2DEmbedder:
             .reshape(hidden_states.shape[0], self.num_kv_heads * self.head_dim)
             .to(torch.bfloat16)
         )
-
+        hidden_states=hidden_states.reshape(hidden_states_shape)
         return q, k
 
 
