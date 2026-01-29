@@ -793,7 +793,7 @@ class HunyuanTopKGate(nn.Module):
 
     def forward(self, hidden_states, topk_impl='default'):
         bsz, seq_len, hidden_size = hidden_states.shape
-        hidden_states = hidden_states.reshape(-1, hidden_size)
+
         if self.wg.weight.dtype == torch.float32:
             hidden_states = hidden_states.float()
         logits = self.wg(hidden_states)
@@ -1416,8 +1416,8 @@ class HunyuanImage3DecoderLayer(nn.Module):
             self.input_layernorm = HunyuanRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.post_attention_layernorm = HunyuanRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         elif config.norm_type == 'fused' or config.norm_type == 'torch_nn':
-            self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             assert False, "other norm_type are not supported"
 
@@ -1461,12 +1461,6 @@ class HunyuanImage3DecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
 
-        # Self Attention
-        # hidden_states, ori_kv_states = self.self_attn(
-        #     positions=position_ids,
-        #     hidden_states=hidden_states,
-        #     kv_states
-        # )
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -1476,7 +1470,6 @@ class HunyuanImage3DecoderLayer(nn.Module):
             use_cache=use_cache,
             **kwargs,
         )
-        # print(f"---------residual:{residual.shape}, hidden_states:{hidden_states.shape}")
         hidden_states = residual + hidden_states
         # Fully Connected
         residual = hidden_states
