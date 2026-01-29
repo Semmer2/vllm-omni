@@ -66,13 +66,22 @@ class AsyncOmniDiffusion:
         self.od_config = od_config
 
         # Load model class name and transformer config
-        config_dict = get_hf_file_to_dict("model_index.json", od_config.model)
-        od_config.model_class_name = config_dict.get("_class_name", None)
-        od_config.update_multimodal_support()
+        try:
+            config_dict = get_hf_file_to_dict("model_index.json", od_config.model)
+            od_config.model_class_name = config_dict.get("_class_name", None)
+            od_config.update_multimodal_support()
 
-        tf_config_dict = get_hf_file_to_dict("transformer/config.json", od_config.model)
-        od_config.tf_model_config = TransformerConfig.from_dict(tf_config_dict)
-
+            tf_config_dict = get_hf_file_to_dict("transformer/config.json", od_config.model)
+            od_config.tf_model_config = TransformerConfig.from_dict(tf_config_dict)
+        except (AttributeError, OSError, ValueError):
+            cfg = get_hf_file_to_dict("config.json", od_config.model)
+            if cfg is None:
+                raise ValueError(f"Could not find config.json or model_index.json for model {od_config.model}")
+            architectures = cfg.get("architectures") or []
+            if architectures and len(architectures) == 1:
+                od_config.model_class_name = architectures[0]
+            else:
+                raise
         # Initialize engine
         self.engine: DiffusionEngine = DiffusionEngine.make_engine(od_config)
 
