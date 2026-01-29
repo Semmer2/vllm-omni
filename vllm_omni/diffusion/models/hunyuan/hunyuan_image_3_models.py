@@ -973,10 +973,6 @@ class HunYuanSparseMoeBlock(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-
-        self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
-        self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
         if self.tp_size > config.num_experts:
@@ -1002,20 +998,9 @@ class HunYuanSparseMoeBlock(nn.Module):
                 else config.moe_intermediate_size[layer_id]
             )
 
-        # Load balancing settings.
-        # vllm_config = get_current_vllm_config()
-        # eplb_config = vllm_config.parallel_config.eplb_config
-        # 
         self.enable_eplb = False
-
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = 0
-        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         self.gate = ReplicatedLinear(
             config.hidden_size,
