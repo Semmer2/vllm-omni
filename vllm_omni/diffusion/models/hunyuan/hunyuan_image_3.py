@@ -922,41 +922,19 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         generator: torch.Generator | list[torch.Generator] | None = None,
         **kwargs,
     ) -> DiffusionOutput:
-
-        prompt = req.prompt if req.prompt is not None else prompt
-        negative_prompt = req.negative_prompt if req.negative_prompt is not None else negative_prompt
-        if generator is None:
-            generator = req.generator
-
-        # get image size
-        # if image_size == "auto":
-        #     pass
-        #     model_inputs = self.prepare_model_inputs(
-        #         prompt=prompt, cot_text=None, bost_task="img_ratio",
-        #         system_prompt=system_prompt, generator=generator
-        #     )
-        #     outputs = self._generate(**model_inputs, **kwargs)
-        #     ratio_index = outputs[0, -1].item() - self._tkwrappper.ratio_token_offset
-
-
-        #     if ratio_index < 0 or ratio_index >= len(self.image_processor.reso_group):
-        #         ratio_index = 16
-        #     reso = self.image_processor.reso_group[ratio_index]
-        #     image_size = reso.height, reso.width
-
-        # height = req.height
-        # width = req.width
-        image_size = (req.height, req.width)
+        
+        prompt = [p if isinstance(p, str) else (p.get("prompt") or "") for p in req.prompts] or prompt
+        if all(isinstance(p, str) or p.get("negative_prompt") is None for p in req.prompts):
+            negative_prompt = None
+        elif req.prompts:
+            negative_prompt = ["" if isinstance(p, str) else (p.get("negative_prompt") or "") for p in req.prompts]
+        generator = req.sampling_params.generator or generator
+        height = req.sampling_params.height or height or self.default_sample_size * self.vae_scale_factor
+        width = req.sampling_params.width or width or self.default_sample_size * self.vae_scale_factor
+        image_size = (height, width)
         model_inputs = self.prepare_model_inputs(
             prompt=prompt, cot_text=None, system_prompt=system_prompt,
             mode="gen_image", generator=generator, image_size=image_size
         )
         outputs = self._generate(**model_inputs, **kwargs)
-        # 1. check inputs
-        # 2. encode prompts
-        # 3. prepare latents and timesteps
-        # 4. diffusion process
-        # 5. decode latents
-        # 6. post-process outputs
-
         return DiffusionOutput(output=outputs[0])

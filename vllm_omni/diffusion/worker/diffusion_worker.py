@@ -17,6 +17,7 @@ from vllm.config import VllmConfig, CompilationConfig, set_current_vllm_config
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.logger import init_logger
 from vllm.utils.mem_utils import GiB_bytes
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from vllm_omni.diffusion.data import (
     DiffusionOutput,
@@ -105,6 +106,7 @@ class DiffusionWorker:
                 tensor_parallel_size=parallel_config.tensor_parallel_size,
                 pipeline_parallel_size=parallel_config.pipeline_parallel_size,
             )
+            init_workspace_manager(self.device)
 
             # Create model runner and load model
             self.model_runner = DiffusionModelRunner(

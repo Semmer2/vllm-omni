@@ -166,6 +166,7 @@ def main():
         cfg_parallel_size=args.cfg_parallel_size,
         tensor_parallel_size=args.tensor_parallel_size,
     )
+    profiler_enabled = bool(os.getenv("VLLM_TORCH_PROFILER_DIR"))
 
     omni = Omni(
         model=args.model,

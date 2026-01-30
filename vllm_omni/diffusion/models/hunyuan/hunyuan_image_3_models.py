@@ -1029,7 +1029,7 @@ class HunYuanSparseMoeBlock(nn.Module):
         else:
             self.shared_mlp = None
 
-        self.experts = SharedFusedMoE(
+        self.experts = HunyuanFusedMoE(
             shared_experts=self.shared_mlp,
             num_experts=self.n_routed_experts,
             top_k=top_k,
@@ -1330,6 +1330,19 @@ class HunYuanCrossAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output, (ori_k, v)
 
+class HunyuanFusedMoE(SharedFusedMoE):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._init_hook_handle = self.register_forward_pre_hook(
+            self._initialize_kernel_hook, 
+            with_kwargs=True
+        )
+
+    def _initialize_kernel_hook(self, module, args, kwargs):
+        # Lazy initialization hook before the first forward pass to ensure self.quant_method holds the correct kernel attributes.
+        if self.quant_method:
+            self.quant_method.process_weights_after_loading(self)
+        self._init_hook_handle.remove()
 
 class HunyuanImage3DecoderLayer(nn.Module):
     def __init__(self, config: HunyuanImage3Config, layer_idx: int, prefix:str = ""):
@@ -1605,7 +1618,7 @@ class HunyuanImage3Model(nn.Module):
         if _is_moe(self.config):
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
-            fused_moe_expert_mapping = SharedFusedMoE.make_expert_params_mapping(
+            fused_moe_expert_mapping = HunyuanFusedMoE.make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
