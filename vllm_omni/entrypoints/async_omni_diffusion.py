@@ -94,15 +94,15 @@ class AsyncOmniDiffusion:
 
             model_type = cfg.get("model_type")
             architectures = cfg.get("architectures") or []
-            if architectures and len(architectures) == 1:
-                od_config.model_class_name = architectures[0]
-            else:
-                raise
 
             if model_type == "bagel" or "BagelForConditionalGeneration" in architectures:
                 od_config.model_class_name = "BagelPipeline"
                 od_config.tf_model_config = TransformerConfig()
                 od_config.update_multimodal_support()
+            elif architectures and len(architectures) == 1:
+                od_config.model_class_name = architectures[0]
+            else:
+                raise
 
         # Initialize engine
         self.engine: DiffusionEngine = DiffusionEngine.make_engine(od_config)
