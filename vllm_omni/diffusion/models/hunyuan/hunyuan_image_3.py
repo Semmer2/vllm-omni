@@ -27,7 +27,6 @@ from .hunyuan_image_3_models import (
     UNetUp,
     build_batch_2d_rope,
     real_batched_index_select,
-    HunyuanStaticCache,
     CausalMMOutputWithPast,
 )
 from .autoencoder_kl_3d import AutoencoderKLConv3D
@@ -39,8 +38,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-BatchRaggedImages = Union[torch.Tensor, List[Union[torch.Tensor, List[torch.Tensor]]]]
-BatchRaggedTensor = Union[torch.Tensor, List[torch.Tensor]]
+BatchRaggedImages = torch.Tensor | list[torch.Tensor | list[torch.Tensor]]
+BatchRaggedTensor = torch.Tensor | list[torch.Tensor]
 
 def default(val, d):
     return val if val is not None else d
@@ -151,7 +150,6 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         from .hunyuan_image3_utils import get_full_state_dict
         from vllm.distributed import get_tensor_model_parallel_rank
         tp_rank = get_tensor_model_parallel_rank()
-        print(f"pre load rank:{tp_rank}")
         state_dict = get_full_state_dict(self.od_config.model)
         non_layer_prefixes = [
             "vae", "vision_model", "vision_aligner", "lm_head",
@@ -234,16 +232,23 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             ts: BatchRaggedTensor,
             image_mask: torch.Tensor,
     ):
-        """
+        r"""
         Instantiate the VAE image embeddings into the input embedding sequence.
-
         Args:
-            x: input sequence, (batch_size, seq_len, n_embd)
-            images: BatchRaggedImages
-                images can be a 4-D tensor, or a list of 4-D tensors, or a list of lists of 3-D tensors.
-            ts: BatchRaggedTensor
-                ts can be a 1-D tensor, or a list of 1-D tensors
-            image_mask: (batch_size, seq_len)
+            x (`torch.Tensor`):
+                Input sequence tensor with shape `(batch_size, seq_len, n_embd)`.
+            images (`BatchRaggedImages`):
+                Batch of images to embed. Can be:
+                - A 4-D tensor (batch, channels, height, width)
+                - A list of 4-D tensors (variable number of images per batch)
+                - A list of lists of 3-D tensors (ragged batch structure)
+            ts (`BatchRaggedTensor`, *optional*):
+                Timestep tensor(s) for conditioning. Can be:
+                - A 1-D tensor (single timestep per batch)
+                - A list of 1-D tensors (variable timesteps per batch)
+            image_mask (`torch.Tensor`, *optional*):
+                Boolean mask tensor with shape `(batch_size, seq_len)` indicating which positions
+                should be replaced with image embeddings.
         """
         batch_size, seq_len, n_embd = x.shape
 
@@ -544,14 +549,6 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             max_cache_len = output.tokens.shape[1]
         else:
             max_cache_len = output.tokens.shape[1] + default(max_new_tokens, self.generation_config.max_length)
-
-        cache = HunyuanStaticCache(
-            config=self.config,
-            batch_size=batch_size * cfg_factor[mode],
-            max_cache_len=max_cache_len,
-            dtype=torch.bfloat16,
-            dynamic=mode == "gen_text",
-        )
 
         # 7. Build position ids
         batch_input_pos = torch.arange(

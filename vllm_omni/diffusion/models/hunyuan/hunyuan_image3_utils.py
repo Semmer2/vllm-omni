@@ -36,13 +36,18 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla=False):
-    """Applies Rotary Position Embedding to the query and key tensors.
+    r"""
+    Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        q (`torch.Tensor`):
+            The query tensor.
+        k (`torch.Tensor`):
+            The key tensor.
+        cos (`torch.Tensor`):
+            The cosine part of the rotary embedding.
+        sin (`torch.Tensor`):
+            The sine part of the rotary embedding.
         position_ids (`torch.Tensor`):
             The position indices of the tokens corresponding to the query and key tensors. For example, this can be
             used to pass offsetted position ids when working with a KV-cache.
@@ -53,8 +58,10 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla
             k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
             cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
             the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+
     Returns:
-        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+        `Tuple[torch.Tensor, torch.Tensor]`:
+            A tuple comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
     if position_ids is not None:
         cos = cos[position_ids]
@@ -76,13 +83,31 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1, mla
 
 
 class HunYuanRotary2DEmbedder:
-    """
+    r"""
     A RoPE wrapper specifically designed for HunYuan-Image attention.
-    Usage:
+
+    This class implements Rotary Position Embedding (RoPE) specifically optimized for
+    the HunYuan-Image model's attention mechanism. It handles the application of rotary
+    embeddings to query and key tensors with support for custom position embeddings
+    and attention metadata.
+
+    Example:
+        ```python
         embedder = HunYuanRotaryEmbedder(num_heads=num_h, num_kv_heads=num_kv, head_dim=h_d)
         q, k = embedder(q, k, hidden_states, custom_pos_emb, first_step, attn_meta)
-    """
+        ```
 
+    Args:
+        num_heads (`int`):
+            Number of attention heads in the model.
+        num_kv_heads (`int`):
+            Number of key-value heads (for grouped-query attention).
+        head_dim (`int`):
+            Dimension of each attention head.
+
+    Methods:
+        __call__: Applies rotary position embedding to query and key tensors.
+    """
     def __init__(self, num_heads: int, num_kv_heads: int, head_dim: int):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads

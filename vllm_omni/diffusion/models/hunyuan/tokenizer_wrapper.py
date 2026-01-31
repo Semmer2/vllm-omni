@@ -367,28 +367,32 @@ class TokenizerWrapper(object):
             pad: Optional[str] = None,
             return_lengths: bool = False,
     ):
-        """
+        r"""
         Encode text and image for AR-like model training of the text-to-image/instruction tuning tasks.
         Support encode multiple texts at once. Each text can be separately conditioned or unconditioned
         based on the uncond_flags and a uniform uncond_p.
         **<bos> token is always prepended to the text tokens.**
 
-        Parameters
-        ----------
-        texts: str or List[str]
-            List of texts to be encoded.
-        uncond_enabled: bool or List[bool]
-            List of flags to indicate whether the text should be unconditioned.
-            If False, the text will never be unconditioned.
-            If True, the text will be unconditioned with uncond_p.
-        uncond_p: float
-            Probability to the unconditional text. Only works when uncond_enabled is True.
-        max_length: int
-            Maximum length of the encoded text.
-        pad: Optional[str]
-            Padding method. Can be 'left' or 'right'.
-        return_lengths: bool
-            Whether to return the length of each encoded text.
+        Args:
+            texts (`str` or `List[str]`):
+                List of texts to be encoded.
+            uncond_enabled (`bool` or `List[bool]`):
+                List of flags to indicate whether the text should be unconditioned.
+                If False, the text will never be unconditioned.
+                If True, the text will be unconditioned with uncond_p.
+            uncond_p (`float`):
+                Probability to the unconditional text. Only works when uncond_enabled is True.
+            max_length (`int`):
+                Maximum length of the encoded text.
+            pad (`str`, *optional*):
+                Padding method. Can be 'left' or 'right'.
+            return_lengths (`bool`):
+                Whether to return the length of each encoded text.
+
+        Returns:
+            `tuple[torch.Tensor, List[int]]` or `torch.Tensor`:
+                If `return_lengths` is True, returns a tuple of (encoded_tokens, lengths).
+                If `return_lengths` is False, returns only the encoded_tokens.
         """
         if pad is not None:
             assert max_length is not None, "max_length should be provided when pad is not None."
@@ -501,53 +505,50 @@ class TokenizerWrapper(object):
             drop_last: Union[str, bool] = 'auto',
             add_image_shape_token=False,
     ):
-        """
+        r"""
         Encode a sequence based on the template (e.g., `text-image` for t2i, `text-image-image` for instruction tuning)
         and token source.
 
-        Parameters
-        ----------
-        template: str
-            Template of the sequence. E.g., "text-gen_image" means the sequence is composed of text and an image.
-            "text-text-gen_image" means the sequence is composed of two sections of text and an image.
-        token_source: Dict[str, List]
-            Token source for each key in the template, in order.
-            - text: List[Dict].
-            - gen_image: List[Dict].
-            - joint_image: List[Dict].
-        total_length: int
-            Total length of the encoded sequence, include padding tokens.
-        add_timestep_token: bool
-            Whether to add timestep token before the image tokens.
-            (Right after the <img_ratio_*><img_size_*> tokens)
-        add_guidance_token: bool
-            Whether to add guidance token before the image tokens.
-        last_key_only_prefix: bool
-            Whether to only use the modal prefix in the last key.
-        add_eos: bool or 'auto'
-            Whether to add eos token at the end of the sequence. If True, always add eos token. If 'auto',
-            add eos token only when the total_length is not reached and the last token is not <eos>.
-        use_front_boi_token: bool:
-            Whether to put the <boi> token at the front of iw, ih and timestep tokens.
-        add_pad: bool or 'auto'
-            Whether to add padding tokens to the sequence. If True and total_length is not reached, add padding tokens.
-        add_bos: bool
-            Whether to add bos token at the beginning of the sequence.
-        drop_last: bool or 'auto'
-            - If auto, drop last tokens exceeding the total_length if the total_length is provided. If cut point is
-                in the middle of the image tokens, an error will raised.
-            - If True, drop last tokens exceeding the total_length. If cut point is in the middle of the image tokens,
-                all the successive image tokens will be dropped.
-            - If False, keep the last tokens exceeding the total_length, even if the total_length is reached.
-        add_image_shape_token: bool
-            Whether to add image shape token before the image tokens. (Right before the <timestep> token)
+        Args:
+            template (`str`):
+                Template of the sequence. E.g., "text-gen_image" means the sequence is composed of text and an image.
+                "text-text-gen_image" means the sequence is composed of two sections of text and an image.
+            token_source (`Dict[str, List]`):
+                Token source for each key in the template, in order.
+                - text: List[Dict].
+                - gen_image: List[Dict].
+                - joint_image: List[Dict].
+            total_length (`int`):
+                Total length of the encoded sequence, include padding tokens.
+            add_timestep_token (`bool`):
+                Whether to add timestep token before the image tokens.
+                (Right after the <img_ratio_*><img_size_*> tokens)
+            add_guidance_token (`bool`):
+                Whether to add guidance token before the image tokens.
+            last_key_only_prefix (`bool`):
+                Whether to only use the modal prefix in the last key.
+            add_eos (`bool` or `'auto'`):
+                Whether to add eos token at the end of the sequence. If True, always add eos token. If 'auto',
+                add eos token only when the total_length is not reached and the last token is not <eos>.
+            use_front_boi_token (`bool`):
+                Whether to put the <boi> token at the front of iw, ih and timestep tokens.
+            add_pad (`bool` or `'auto'`):
+                Whether to add padding tokens to the sequence. If True and total_length is not reached, add padding tokens.
+            add_bos (`bool`):
+                Whether to add bos token at the beginning of the sequence.
+            drop_last (`bool` or `'auto'`):
+                - If auto, drop last tokens exceeding the total_length if the total_length is provided. If cut point is
+                    in the middle of the image tokens, an error will raised.
+                - If True, drop last tokens exceeding the total_length. If cut point is in the middle of the image tokens,
+                    all the successive image tokens will be dropped.
+                - If False, keep the last tokens exceeding the total_length, even if the total_length is reached.
+            add_image_shape_token (`bool`):
+                Whether to add image shape token before the image tokens. (Right before the <timestep> token)
 
-        Returns
-        -------
-        token_seq: list
-            Encoded token sequence.
-        extra_token_pos: dict
-            Positions of extra tokens.
+        Returns:
+            `tuple[list, dict]`: A tuple containing:
+                - token_seq (`list`): Encoded token sequence.
+                - extra_token_pos (`dict`): Positions of extra tokens.
         """
         if last_key_only_prefix:
             assert add_eos is not True, "add_eos should not be True when last_key_only_prefix is True."
@@ -741,26 +742,25 @@ class TokenizerWrapper(object):
             condition_repeat_times: int = 1,
             uncondition_repeat_times: int = 1,
     ):
-        """
+        r"""
         Batch inference for the AR-like model training of the text-to-image/instruction tuning tasks.
 
-        Parameters
-        ----------
-        infer_fn: callable
-            Inference function to encode the prompt.
-        prompt_list: list
-            List of prompts. Each element can be a single prompt or a list of prompts passed to the infer_fn.
-        negative_prompt_list: list
-            List of negative prompts. Only used when do_classifier_free_guidance is True. If None, will use <cfg>
-            token sequence as negative prompt.
-        infer_fn_kwargs_list: List[Dict[str, int]]
-            List of keyword arguments for the infer_fn.
-        do_classifier_free_guidance: bool
-            Whether to do classifier-free guidance.
-        condition_repeat_times: int
-            Support multi-condition.
-        uncondition_repeat_times: int
-            Support multi-uncondition.
+        Args:
+            infer_fn (`callable`):
+                Inference function to encode the prompt.
+            prompt_list (`list`):
+                List of prompts. Each element can be a single prompt or a list of prompts passed to the infer_fn.
+            negative_prompt_list (`list`, *optional*):
+                List of negative prompts. Only used when do_classifier_free_guidance is True. If None, will use <cfg>
+                token sequence as negative prompt.
+            infer_fn_kwargs_list (`List[Dict[str, int]]`, *optional*):
+                List of keyword arguments for the infer_fn.
+            do_classifier_free_guidance (`bool`):
+                Whether to do classifier-free guidance.
+            condition_repeat_times (`int`):
+                Support multi-condition.
+            uncondition_repeat_times (`int`):
+                Support multi-uncondition.
         """
         if infer_fn_kwargs_list is None:
             infer_fn_kwargs_list = [{} for _ in prompt_list]
@@ -866,9 +866,9 @@ class TokenizerWrapper(object):
         for cond_results, uncond_results in zip(cond_results_list, uncond_results_list):
             stacked_outputs.append(make_batch(cond_results, uncond_results))
 
-        if output_type == list:
+        if output_type is list:
             return stacked_outputs
-        elif output_type == tuple:
+        elif output_type is tuple:
             return tuple(stacked_outputs)
         elif output_num == 1:
             return stacked_outputs[0]
@@ -901,63 +901,64 @@ class TokenizerWrapper(object):
             add_bos=True,
             drop_last='auto',
     ):
-        """
+        r"""
         General encode function to encode a sequence with multiple sections of text and images.
         Each section is a dict with a `type` key and other keys depending on the type.
+
         Supported section types:
+
         - text: dict with keys:
-            - text: str or List[int], text to be encoded. Either `text` or `tokens` should be provided.
-            - tokens: List[int], pre-encoded text tokens. Either `text` or `tokens` should be provided.
-            - uncond_enabled: bool, whether to enable uncondition for this text section.
-            - uncond_p: float, probability to drop the text section for uncondition.
-            - max_length: int, maximum length of the text section.
-            - ignore: bool, whether to ignore this text section in the text mask.
-            - start_offset: int, start offset of the text mask.
-            - end_offset: int, end offset of the text mask.
+            - text (`str` or `List[int]`): Text to be encoded. Either `text` or `tokens` should be provided.
+            - tokens (`List[int]`): Pre-encoded text tokens. Either `text` or `tokens` should be provided.
+            - uncond_enabled (`bool`): Whether to enable uncondition for this text section.
+            - uncond_p (`float`): Probability to drop the text section for uncondition.
+            - max_length (`int`): Maximum length of the text section.
+            - ignore (`bool`): Whether to ignore this text section in the text mask.
+            - start_offset (`int`): Start offset of the text mask.
+            - end_offset (`int`): End offset of the text mask.
+
         - gen_image: dict with keys:
-            - token_length: int, number of image tokens.
-            - add_timestep_token: bool, whether to add timestep token before the image tokens.
-            - add_guidance_token: bool, whether to add guidance token before the image tokens.
-            - use_front_boi_token: bool, whether to put the <boi> token at the front of size, ratio and timestep tokens.
-            - add_image_shape_token: bool, whether to add image shape token before the image tokens.
-            - base_size: int, base size of the image.
-            - ratio_idx: int, ratio index of the image.
+            - token_length (`int`): Number of image tokens.
+            - add_timestep_token (`bool`): Whether to add timestep token before the image tokens.
+            - add_guidance_token (`bool`): Whether to add guidance token before the image tokens.
+            - use_front_boi_token (`bool`): Whether to put the <boi> token at the front of size, ratio and timestep tokens.
+            - add_image_shape_token (`bool`): Whether to add image shape token before the image tokens.
+            - base_size (`int`): Base size of the image.
+            - ratio_idx (`int`): Ratio index of the image.
+
         - joint_image: dict with keys:
-            - token_length: List[int], number of image tokens for the two images.
-            - add_timestep_token: bool, whether to add timestep token before the image tokens.
-            - use_front_boi_token: bool, whether to put the <boi> token at the front of size, ratio and timestep tokens.
-            - add_image_shape_token: bool, whether to add image shape token before the image tokens.
-            - base_size: int, base size of the image.
-            - ratio_idx: int, ratio index of the image.
+            - token_length (`List[int]`): Number of image tokens for the two images.
+            - add_timestep_token (`bool`): Whether to add timestep token before the image tokens.
+            - use_front_boi_token (`bool`): Whether to put the <boi> token at the front of size, ratio and timestep tokens.
+            - add_image_shape_token (`bool`): Whether to add image shape token before the image tokens.
+            - base_size (`int`): Base size of the image.
+            - ratio_idx (`int`): Ratio index of the image.
 
-        Parameters
-        ----------
-        sections: List[Dict[str, Any]]
-            List of sections to be encoded.
-        max_token_length: int
-            Maximum length of the encoded token sequence.
-        add_eos: bool or 'auto'
-            Whether to add eos token at the end of the sequence. If True, always add eos
-            token. If 'auto', add eos token only when the total_length is not reached and the last token is not <eos>.
-        use_text_mask: bool
-            Whether to generate text mask.
-        add_pad: bool or 'auto'
-            Whether to add padding tokens to the sequence. If True and total_length is not reached,
-            add padding tokens.
-        add_bos: bool
-            Whether to add bos token at the beginning of the sequence.
-        drop_last: bool or 'auto'
-            - If auto, drop last tokens exceeding the total_length if the total_length is provided.
-            If cut point is in the middle of the image tokens, an error will raised.
-            - If True, drop last tokens exceeding the total_length. If cut point is in the
-            middle of the image tokens, all the successive image tokens will be dropped.
-            - If False, keep the last tokens exceeding the total_length, even if the total_length
-            is reached.
+        Args:
+            sections (`List[Dict[str, Any]]`):
+                List of sections to be encoded.
+            max_token_length (`int`):
+                Maximum length of the encoded token sequence.
+            add_eos (`bool` or `'auto'`):
+                Whether to add eos token at the end of the sequence. If True, always add eos
+                token. If 'auto', add eos token only when the total_length is not reached and the last token is not <eos>.
+            use_text_mask (`bool`):
+                Whether to generate text mask.
+            add_pad (`bool` or `'auto'`):
+                Whether to add padding tokens to the sequence. If True and total_length is not reached,
+                add padding tokens.
+            add_bos (`bool`):
+                Whether to add bos token at the beginning of the sequence.
+            drop_last (`bool` or `'auto'`):
+                - If auto, drop last tokens exceeding the total_length if the total_length is provided.
+                If cut point is in the middle of the image tokens, an error will raised.
+                - If True, drop last tokens exceeding the total_length. If cut point is in the
+                middle of the image tokens, all the successive image tokens will be dropped.
+                - If False, keep the last tokens exceeding the total_length, even if the total_length
+                is reached.
 
-        Returns
-        -------
-        TokenizerEncodeOutput
-            Encoded token sequence and extra information.
+        Returns:
+            `TokenizerEncodeOutput`: Encoded token sequence and extra information.
         """
         if sections is None:
             raise ValueError("sections must be provided.")

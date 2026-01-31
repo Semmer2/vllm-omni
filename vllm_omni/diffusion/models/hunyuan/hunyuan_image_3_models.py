@@ -664,7 +664,6 @@ class HunYuanAttention(nn.Module):
             q, k = self.image_rope2d_emb(q, k, hidden_states, custom_pos_emb, **kwargs)
         else:
             q, k = self.rotary_emb(positions, q, k)
-        ori_k = k
         if self.use_qk_norm:
             q = self.query_layernorm(
                 q.view(-1, self.num_heads, self.head_dim).contiguous()
@@ -693,7 +692,6 @@ class HunyuanFusedMoE(SharedFusedMoE):
         )
 
     def _initialize_kernel_hook(self, module, args, kwargs):
-        # Lazy initialization hook before the first forward pass to ensure self.quant_method holds the correct kernel attributes.
         if self.quant_method:
             self.quant_method.process_weights_after_loading(self)
         self._init_hook_handle.remove()
@@ -963,7 +961,6 @@ class HunyuanImage3Model(nn.Module):
     # rename for delay load
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         tp_rank = get_tensor_model_parallel_rank()
-        print(f"load tp: {tp_rank}")
         cla_factor = _get_cla_factor(self.config)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -1037,8 +1034,6 @@ class HunyuanImage3Model(nn.Module):
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
-                if scale_name not in params_dict.keys():
-                    continue
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -1063,11 +1058,7 @@ class HunyuanImage3Model(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-
                 if is_pp_missing_parameter(name, self):
-                    continue
-
-                if name not in params_dict.keys():
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -1099,9 +1090,6 @@ class HunyuanImage3Model(nn.Module):
 
                 assert loaded_weight.shape[0] % den == 0
                 units = loaded_weight.shape[0] // den
-
-                if name not in params_dict.keys():
-                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 offset = 0
@@ -1155,9 +1143,6 @@ class HunyuanImage3Model(nn.Module):
                     #     print(f"name_mapped: {name_mapped}, found_num: {found_num}")
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
-
-                    if name_mapped not in params_dict.keys():
-                        continue
                     param = params_dict[name_mapped]
                     # We should ask the weight loader to return success or not
                     # here since otherwise we may skip experts with other
@@ -1202,9 +1187,6 @@ class HunyuanImage3Model(nn.Module):
                     name = "norm.weight"
                 if name == "wte.weight":
                     name = "embed_tokens.weight"
-
-                if name not in params_dict.keys():
-                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -1881,20 +1863,6 @@ def _to_tuple(x, dim=2):
 
 
 def get_meshgrid_nd(start, *args, dim=2):
-    """
-    Get n-D meshgrid with start, stop and num.
-
-    Args:
-        start (int or tuple): If len(args) == 0, start is num; If len(args) == 1, start is start, args[0] is stop,
-            step is 1; If len(args) == 2, start is start, args[0] is stop, args[1] is num. For n-dim, start/stop/num
-            should be int or n-tuple. If n-tuple is provided, the meshgrid will be stacked following the dim order in
-            n-tuples.
-        *args: See above.
-        dim (int): Dimension of the meshgrid. Defaults to 2.
-
-    Returns:
-        grid (np.ndarray): [dim, ...]
-    """
     if len(args) == 0:
         # start is grid_size
         num = _to_tuple(start, dim=dim)
@@ -1934,18 +1902,7 @@ def build_2d_rope(
         device: Optional[torch.device] = None, base: int = 10000, base_rescale_factor: float = 1.0,
         return_all_pos: bool = False,
 ):
-    """
-    Reference: https://kexue.fm/archives/10352
-
-    Start from 1, we have
-        beta_y = L + (wh - h)/2
-        beta_x = L + (wh - w)/2
-
-    Returns
-    -------
-    cos: torch.Tensor with shape of [seq_len, n_elem]
-    sin: torch.Tensor with shape of [seq_len, n_elem]
-    """
+    
     assert n_elem % 4 == 0, f"n_elem must be divisible by 4, but got {n_elem}."
 
     # theta
@@ -2050,21 +2007,32 @@ def build_batch_2d_rope(
 
 
 class ResBlock(nn.Module):
-    """
+    r"""
     A residual block that can optionally change the number of channels.
 
-    :param in_channels: the number of input channels.
-    :param emb_channels: the number of timestep embedding channels.
-    :param dropout: the rate of dropout.
-    :param out_channels: if specified, the number of out channels.
-    :param use_conv: if True and out_channels is specified, use a spatial
-        convolution instead of a smaller 1x1 convolution to change the
-        channels in the skip connection.
-    :param dims: determines if the signal is 1D, 2D, or 3D.
-    :param up: if True, use this block for upsampling.
-    :param down: if True, use this block for downsampling.
-    """
+    Args:
+        in_channels (`int`):
+            The number of input channels.
+        emb_channels (`int`):
+            The number of timestep embedding channels.
+        dropout (`float`):
+            The rate of dropout.
+        out_channels (`int`, *optional*):
+            If specified, the number of output channels.
+        use_conv (`bool`, *optional*):
+            If True and out_channels is specified, use a spatial convolution instead of a
+            smaller 1x1 convolution to change the channels in the skip connection.
+        dims (`int`, *optional*):
+            Determines if the signal is 1D, 2D, or 3D.
+        up (`bool`, *optional*):
+            If True, use this block for upsampling.
+        down (`bool`, *optional*):
+            If True, use this block for downsampling.
 
+    Returns:
+        `torch.Tensor`:
+            The output tensor after applying the residual block.
+    """
     def __init__(
         self,
         in_channels,
@@ -2141,12 +2109,6 @@ class ResBlock(nn.Module):
 
 
 class UNetDown(nn.Module):
-    """
-    patch_size: one of [1, 2 ,4 ,8]
-    in_channels: vae latent dim
-    hidden_channels: hidden dim for reducing parameters
-    out_channels: transformer model dim
-    """
     def __init__(self, patch_size, in_channels, emb_channels, hidden_channels, out_channels,
                  dropout=0.0, device=None, dtype=None):
         factory_kwargs = {'dtype': dtype, 'device': device}
@@ -2198,12 +2160,6 @@ class UNetDown(nn.Module):
 
 
 class UNetUp(nn.Module):
-    """
-    patch_size: one of [1, 2 ,4 ,8]
-    in_channels: transformer model dim
-    hidden_channels: hidden dim for reducing parameters
-    out_channels: vae latent dim
-    """
     def __init__(self, patch_size, in_channels, emb_channels, hidden_channels, out_channels,
                  dropout=0.0, device=None, dtype=None, out_norm=False):
         factory_kwargs = {'dtype': dtype, 'device': device}
@@ -2267,92 +2223,4 @@ class UNetUp(nn.Module):
         return x
 
 
-class HunyuanStaticCache(StaticCache):
-    """
-    A custom static cache for multi-modal models that supports dynamic extension of the cache
-    and inplace updates of the cache.
 
-    This cache supports batch cache_position updates.
-    """
-    def __init__(self, *args, **kwargs):
-        self.dynamic = kwargs.pop("dynamic", False)
-        super().__init__(*args, **kwargs)
-
-    def update(
-        self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
-        It is VERY important to index using a tensor, otherwise you introduce a copy to the device.
-
-        Parameters:
-            key_states (`torch.Tensor`):
-                The new key states to cache.
-            value_states (`torch.Tensor`):
-                The new value states to cache.
-            layer_idx (`int`):
-                The index of the layer to cache the states for.
-            cache_kwargs (`Dict[str, Any]`, `optional`):
-                Additional arguments for the cache subclass. The `StaticCache` needs the `cache_position` input
-                to know how where to write in the cache.
-
-        Return:
-            A tuple containing the updated key and value states.
-        """
-        cache_position = cache_kwargs.get("cache_position")
-        if hasattr(self, "key_cache") and hasattr(self, "value_cache"):
-            if self.key_cache[layer_idx].device != key_states.device:
-                self.key_cache[layer_idx] = self.key_cache[layer_idx].to(key_states.device)
-                self.value_cache[layer_idx] = self.value_cache[layer_idx].to(value_states.device)
-            k_out = self.key_cache[layer_idx]
-            v_out = self.value_cache[layer_idx]
-            key_states = key_states.to(k_out.dtype)
-            value_states = value_states.to(v_out.dtype)
-        else:
-            if self.layers[layer_idx].keys is None:
-                self.layers[layer_idx].lazy_initialization(key_states)
-            k_out = self.layers[layer_idx].keys
-            v_out = self.layers[layer_idx].values
-
-        if k_out.shape != key_states.shape:
-            print("cache tensor not equal!")
-
-        if cache_position is None:
-            # print(f"----updating static cache: key_states: {key_states.shape.shape}, k_out: {k_out.shape}, value_states: {value_states.shape}, v_out: {v_out.shape}")
-            k_out.copy_(key_states)
-            v_out.copy_(value_states)
-        else:
-            # Note: here we use `tensor.index_copy_(dim, index, tensor)` that is equivalent to
-            # `tensor[:, :, index] = tensor`, but the first one is compile-friendly and it does explicitly an in-place
-            # operation, that avoids copies and uses less memory.
-            if cache_position.dim() == 1:
-                k_out.index_copy_(2, cache_position, key_states)
-                v_out.index_copy_(2, cache_position, value_states)
-
-                if self.dynamic:
-                    end = cache_position[-1].item() + 1
-                    k_out = k_out[:, :, :end]
-                    v_out = v_out[:, :, :end]
-            else:
-                assert cache_position.dim() == 2, f"multiple batch dims not yet {cache_position.shape=}"
-                batch_size, idx_size = cache_position.shape
-                assert batch_size == k_out.size(0)
-                assert batch_size == v_out.size(0)
-                assert batch_size == key_states.size(0)
-                assert batch_size == value_states.size(0)
-                for i in range(batch_size):
-                    unbatched_dim = 1
-                    k_out[i].index_copy_(unbatched_dim, cache_position[i], key_states[i])
-                    v_out[i].index_copy_(unbatched_dim, cache_position[i], value_states[i])
-
-                if self.dynamic:
-                    assert len(cache_position) == 1
-                    end = cache_position[0, -1].item() + 1
-                    k_out = k_out[:, :, :end]
-                    v_out = v_out[:, :, :end]
-
-        return k_out, v_out
