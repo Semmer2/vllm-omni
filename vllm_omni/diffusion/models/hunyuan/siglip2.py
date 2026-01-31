@@ -36,30 +36,14 @@ import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
-
+from vllm.model_executor.models.siglip2 import Siglip2VisionEmbeddings
 
 class Config(object):
     def __init__(self, config):
         if config is not None:
             for key, value in config.items():
                 setattr(self, key, value)
-
-class Siglip2VisionEmbeddings(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.embed_dim = config.hidden_size
-        self.patch_size = config.patch_size
-
-        self.patch_embedding = nn.Linear(
-            in_features=config.num_channels * self.patch_size * self.patch_size,
-            out_features=self.embed_dim,
-        )
-
-        self.num_patches = config.num_patches
-        self.position_embedding_size = int(self.num_patches**0.5)
-        self.position_embedding = nn.Embedding(self.num_patches, self.embed_dim)
-
+        
 class Siglip2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 

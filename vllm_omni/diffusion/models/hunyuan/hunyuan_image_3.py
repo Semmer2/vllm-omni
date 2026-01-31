@@ -16,11 +16,11 @@ from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineL
 from vllm.transformers_utils.config import get_config
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.config.vllm import get_current_vllm_config
-
+from diffusers import FlowMatchEulerDiscreteScheduler
 from .hunyuan_image_3_models import (
+    HunyuanImage3ImageProcessor,
     HunyuanImage3Model,
     HunyuanImage3PreTrainedModel,
-    FlowMatchDiscreteScheduler,
     HunyuanImage3Text2ImagePipeline,
     TimestepEmbedder,
     UNetDown,
@@ -31,7 +31,6 @@ from .hunyuan_image_3_models import (
     CausalMMOutputWithPast,
 )
 from .autoencoder_kl_3d import AutoencoderKLConv3D
-from .image_processor import HunyuanImage3ImageProcessor
 from .siglip2 import Siglip2VisionTransformer, LightProjector
 from .tokenizer_wrapper import TokenizerWrapper, ImageInfo
 
@@ -207,8 +206,14 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
     def pipeline(self):
         if self._pipeline is None:
             # shift hard code
-            self.scheduler = FlowMatchDiscreteScheduler(
-                shift=self.generation_config.flow_shift, reverse=True, solver="euler",
+            self.scheduler = FlowMatchEulerDiscreteScheduler(
+            num_train_timesteps=1000,
+            shift=self.generation_config.flow_shift,  
+            use_dynamic_shifting=False,  
+            base_shift=0.5, 
+            max_shift=1.15, 
+            time_shift_type="exponential",  
+            stochastic_sampling=False, 
             )
             self._pipeline = HunyuanImage3Text2ImagePipeline(
                 model=self, scheduler=self.scheduler, vae=self.vae
@@ -371,7 +376,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             for section in sections_i:
                 if 'image' in section['type']:
                     if isinstance(section['token_height'], list):
-                        assert len(section['token_height']) == len(section['token_height']), \
+                        assert len(section['token_height']) == len(section['token_width']), \
                             (f"token_height and token_width should have the same length, "
                              f"but got {len(section['token_height'])} and {len(section['token_width'])}")
                         image_shapes.extend(list(zip(section['token_height'], section['token_width'])))

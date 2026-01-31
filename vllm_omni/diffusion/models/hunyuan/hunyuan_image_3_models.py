@@ -70,6 +70,10 @@ from .hunyuan_image3_utils import (
     HunYuanRotary2DEmbedder,
     ImageKVCacheManager,
 )
+
+from torchvision import transforms
+from transformers import Siglip2ImageProcessorFast
+from .tokenizer_wrapper import ImageInfo, ResolutionGroup
 # from vllm_omni.diffusion.data import OmniDiffusionConfig
 
 try:
@@ -349,6 +353,48 @@ class HunyuanImage3Config(PretrainedConfig):
             **kwargs,
         )
 
+class HunyuanImage3ImageProcessor(object):
+    def __init__(self, config):
+        self.config = config
+
+        self.reso_group = ResolutionGroup(base_size=config.image_base_size)
+        self.vae_processor = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5]),  # transform to [-1, 1]
+        ])
+        self.vision_encoder_processor = Siglip2ImageProcessorFast.from_dict(config.vit_processor)
+
+    def build_image_info(self, image_size):
+        # parse image size (HxW, H:W, or <img_ratio_i>)
+        if isinstance(image_size, str):
+            if image_size.startswith("<img_ratio_"):
+                ratio_index = int(image_size.split("_")[-1].rstrip(">"))
+                reso = self.reso_group[ratio_index]
+                image_size = reso.height, reso.width
+            elif 'x' in image_size:
+                image_size = [int(s) for s in image_size.split('x')]
+            elif ':' in image_size:
+                image_size = [int(s) for s in image_size.split(':')]
+            else:
+                raise ValueError(
+                    f"`image_size` should be in the format of 'HxW', 'H:W' or <img_ratio_i>, got {image_size}.")
+            assert len(image_size) == 2, f"`image_size` should be in the format of 'HxW', got {image_size}."
+        elif isinstance(image_size, (list, tuple)):
+            assert len(image_size) == 2 and all(isinstance(s, int) for s in image_size), \
+                f"`image_size` should be a tuple of two integers or a string in the format of 'HxW', got {image_size}."
+        else:
+            raise ValueError(f"`image_size` should be a tuple of two integers or a string in the format of 'WxH', "
+                             f"got {image_size}.")
+        image_width, image_height = self.reso_group.get_target_size(image_size[1], image_size[0])
+        token_height = image_height // (self.config.vae_downsample_factor[0] * self.config.patch_size)
+        token_width = image_width // (self.config.vae_downsample_factor[1] * self.config.patch_size)
+        base_size, ratio_idx = self.reso_group.get_base_size_and_ratio_index(image_size[1], image_size[0])
+        image_info = ImageInfo(
+            image_type="gen_image", image_width=image_width, image_height=image_height,
+            token_width=token_width, token_height=token_height, base_size=base_size, ratio_index=ratio_idx,
+        )
+        return image_info
+    
 class HunYuanMLP(nn.Module):
     def __init__(
         self,
@@ -830,15 +876,9 @@ def _get_cla_factor(config: PretrainedConfig) -> int:
 class HunyuanImage3Model(nn.Module):
     def __init__(self, config: HunyuanImage3Config, prefix: str = ""):
         super().__init__()
-
-        config = config
-        cache_config = None
         quant_config = None
         lora_config = None
-        eplb_config = None
-        enable_eplb = False
         self.num_redundant_experts = 0
-
         self.config = config
         self.quant_config = quant_config
         self.padding_idx = config.pad_token_id
@@ -951,7 +991,6 @@ class HunyuanImage3Model(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        pass
         expert_params_mapping, expert_weights_remapping = self.get_expert_mapping()
 
         # List of unexpected keywords in weight names
@@ -1260,269 +1299,6 @@ class HunyuanImage3Model(nn.Module):
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
-
-
-@dataclass
-class FlowMatchDiscreteSchedulerOutput(BaseOutput):
-    """
-    Output class for the scheduler's `step` function output.
-
-    Args:
-        prev_sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
-            Computed sample `(x_{t-1})` of previous timestep. `prev_sample` should be used as next model input in the
-            denoising loop.
-    """
-
-    prev_sample: torch.FloatTensor
-
-class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
-    """
-    Euler scheduler.
-
-    This model inherits from [`SchedulerMixin`] and [`ConfigMixin`]. Check the superclass documentation for the generic
-    methods the library implements for all schedulers such as loading and saving.
-
-    Args:
-        num_train_timesteps (`int`, defaults to 1000):
-            The number of diffusion steps to train the model.
-        timestep_spacing (`str`, defaults to `"linspace"`):
-            The way the timesteps should be scaled. Refer to Table 2 of the [Common Diffusion Noise Schedules and
-            Sample Steps are Flawed](https://huggingface.co/papers/2305.08891) for more information.
-        shift (`float`, defaults to 1.0):
-            The shift value for the timestep schedule.
-        reverse (`bool`, defaults to `True`):
-            Whether to reverse the timestep schedule.
-    """
-
-    _compatibles = []
-    order = 1
-
-    @register_to_config
-    def __init__(
-            self,
-            num_train_timesteps: int = 1000,
-            shift: float = 1.0,
-            reverse: bool = True,
-            solver: str = "euler",
-            use_flux_shift: bool = False,
-            flux_base_shift: float = 0.5,
-            flux_max_shift: float = 1.15,
-            n_tokens: Optional[int] = None,
-    ):
-        sigmas = torch.linspace(1, 0, num_train_timesteps + 1)
-
-        if not reverse:
-            sigmas = sigmas.flip(0)
-
-        self.sigmas = sigmas
-        # the value fed to model
-        self.timesteps = (sigmas[:-1] * num_train_timesteps).to(dtype=torch.float32)
-        self.timesteps_full = (sigmas * num_train_timesteps).to(dtype=torch.float32)
-
-        self._step_index = None
-        self._begin_index = None
-
-        self.supported_solver = [
-            "euler",
-            "heun-2", "midpoint-2",
-            "kutta-4",
-        ]
-        if solver not in self.supported_solver:
-            raise ValueError(f"Solver {solver} not supported. Supported solvers: {self.supported_solver}")
-
-        # empty dt and derivative (for heun)
-        self.derivative_1 = None
-        self.derivative_2 = None
-        self.derivative_3 = None
-        self.dt = None
-
-    @property
-    def step_index(self):
-        """
-        The index counter for current timestep. It will increase 1 after each scheduler step.
-        """
-        return self._step_index
-
-    @property
-    def begin_index(self):
-        """
-        The index for the first timestep. It should be set from pipeline with `set_begin_index` method.
-        """
-        return self._begin_index
-
-    # Copied from diffusers.schedulers.scheduling_dpmsolver_multistep.DPMSolverMultistepScheduler.set_begin_index
-    def set_begin_index(self, begin_index: int = 0):
-        """
-        Sets the begin index for the scheduler. This function should be run from pipeline before the inference.
-
-        Args:
-            begin_index (`int`):
-                The begin index for the scheduler.
-        """
-        self._begin_index = begin_index
-
-    def _sigma_to_t(self, sigma):
-        return sigma * self.config.num_train_timesteps
-    def set_timesteps(self, num_inference_steps: int, device: Union[str, torch.device] = None,
-                      n_tokens: int = None):
-        """
-        Sets the discrete timesteps used for the diffusion chain (to be run before inference).
-
-        Args:
-            num_inference_steps (`int`):
-                The number of diffusion steps used when generating samples with a pre-trained model.
-            device (`str` or `torch.device`, *optional*):
-                The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
-            n_tokens (`int`, *optional*):
-                Number of tokens in the input sequence.
-        """
-        self.num_inference_steps = num_inference_steps
-
-        sigmas = torch.linspace(1, 0, num_inference_steps + 1)
-
-        # Apply timestep shift
-        if self.config.use_flux_shift:
-            assert isinstance(n_tokens, int), "n_tokens should be provided for flux shift"
-            mu = self.get_lin_function(y1=self.config.flux_base_shift, y2=self.config.flux_max_shift)(n_tokens)
-            sigmas = self.flux_time_shift(mu, 1.0, sigmas)
-        elif self.config.shift != 1.:
-            sigmas = self.sd3_time_shift(sigmas)
-
-        if not self.config.reverse:
-            sigmas = 1 - sigmas
-
-        self.sigmas = sigmas
-        self.timesteps = (sigmas[:-1] * self.config.num_train_timesteps).to(dtype=torch.float32, device=device)
-        self.timesteps_full = (sigmas * self.config.num_train_timesteps).to(dtype=torch.float32, device=device)
-
-        # empty dt and derivative (for kutta)
-        self.derivative_1 = None
-        self.derivative_2 = None
-        self.derivative_3 = None
-        self.dt = None
-
-        # Reset step index
-        self._step_index = None
-
-    def index_for_timestep(self, timestep, schedule_timesteps=None):
-        if schedule_timesteps is None:
-            schedule_timesteps = self.timesteps
-
-        indices = (schedule_timesteps == timestep).nonzero()
-
-        # The sigma index that is taken for the **very** first `step`
-        # is always the second index (or the last index if there is only 1)
-        # This way we can ensure we don't accidentally skip a sigma in
-        # case we start in the middle of the denoising schedule (e.g. for image-to-image)
-        pos = 1 if len(indices) > 1 else 0
-
-        return indices[pos].item()
-
-    def _init_step_index(self, timestep):
-        if self.begin_index is None:
-            if isinstance(timestep, torch.Tensor):
-                timestep = timestep.to(self.timesteps.device)
-            self._step_index = self.index_for_timestep(timestep)
-        else:
-            self._step_index = self._begin_index
-
-    def scale_model_input(self, sample: torch.Tensor, timestep: Optional[int] = None) -> torch.Tensor:
-        return sample
-
-    def sd3_time_shift(self, t: torch.Tensor):
-        return (self.config.shift * t) / (1 + (self.config.shift - 1) * t)
-
-    def step(
-            self,
-            model_output: torch.FloatTensor,
-            timestep: Union[float, torch.FloatTensor],
-            sample: torch.FloatTensor,
-            pred_uncond: torch.FloatTensor = None,
-            generator: Optional[torch.Generator] = None,
-            n_tokens: Optional[int] = None,
-            return_dict: bool = True,
-    ) -> Union[FlowMatchDiscreteSchedulerOutput, Tuple]:
-        """
-        Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
-        process from the learned model outputs (most often the predicted noise).
-
-        Args:
-            model_output (`torch.FloatTensor`):
-                The direct output from learned diffusion model.
-            timestep (`float`):
-                The current discrete timestep in the diffusion chain.
-            sample (`torch.FloatTensor`):
-                A current instance of a sample created by the diffusion process.
-            generator (`torch.Generator`, *optional*):
-                A random number generator.
-            n_tokens (`int`, *optional*):
-                Number of tokens in the input sequence.
-            return_dict (`bool`):
-                Whether or not to return a [`~schedulers.scheduling_euler_discrete.EulerDiscreteSchedulerOutput`] or
-                tuple.
-
-        Returns:
-            [`~schedulers.scheduling_euler_discrete.EulerDiscreteSchedulerOutput`] or `tuple`:
-                If return_dict is `True`, [`~schedulers.scheduling_euler_discrete.EulerDiscreteSchedulerOutput`] is
-                returned, otherwise a tuple is returned where the first element is the sample tensor.
-        """
-
-        if (
-                isinstance(timestep, int)
-                or isinstance(timestep, torch.IntTensor)
-                or isinstance(timestep, torch.LongTensor)
-        ):
-            raise ValueError(
-                (
-                    "Passing integer indices (e.g. from `enumerate(timesteps)`) as timesteps to"
-                    " `EulerDiscreteScheduler.step()` is not supported. Make sure to pass"
-                    " one of the `scheduler.timesteps` as a timestep."
-                ),
-            )
-
-        if self.step_index is None:
-            self._init_step_index(timestep)
-
-        # Upcast to avoid precision issues when computing prev_sample
-        sample = sample.to(torch.float32)
-        model_output = model_output.to(torch.float32)
-        pred_uncond = pred_uncond.to(torch.float32) if pred_uncond is not None else None
-
-        # dt = self.sigmas[self.step_index + 1] - self.sigmas[self.step_index]
-        sigma = self.sigmas[self.step_index]
-        sigma_next = self.sigmas[self.step_index + 1]
-
-        last_inner_step = True
-        if self.config.solver == "euler":
-            derivative, dt, sample, last_inner_step = self.first_order_method(model_output, sigma, sigma_next, sample)
-        elif self.config.solver in ["heun-2", "midpoint-2"]:
-            derivative, dt, sample, last_inner_step = self.second_order_method(model_output, sigma, sigma_next, sample)
-        elif self.config.solver == "kutta-4":
-            derivative, dt, sample, last_inner_step = self.fourth_order_method(model_output, sigma, sigma_next, sample)
-        else:
-            raise ValueError(f"Solver {self.config.solver} not supported. Supported solvers: {self.supported_solver}")
-
-        prev_sample = sample + derivative * dt
-
-        # Cast sample back to model compatible dtype
-        # prev_sample = prev_sample.to(model_output.dtype)
-
-        # upon completion increase step index by one
-        if last_inner_step:
-            self._step_index += 1
-
-        if not return_dict:
-            return (prev_sample,)
-
-        return FlowMatchDiscreteSchedulerOutput(prev_sample=prev_sample)
-
-    def first_order_method(self, model_output, sigma, sigma_next, sample):
-        derivative = model_output
-        dt = sigma_next - sigma
-        return derivative, dt, sample, True
-
-    def __len__(self):
-        return self.config.num_train_timestepsclass
     
 class ClassifierFreeGuidance:
     def __init__(
@@ -1905,7 +1681,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * cfg_factor)
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                #latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 t_expand = t.repeat(latent_model_input.shape[0])
 
@@ -1925,10 +1701,6 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
                 if self.do_classifier_free_guidance:
                     pred_cond, pred_uncond = pred.chunk(2)
                     pred = self.cfg_operator(pred_cond, pred_uncond, self.guidance_scale, step=i)
-
-                if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
-                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                    pred = rescale_noise_cfg(pred, pred_cond, guidance_rescale=self.guidance_rescale)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(pred, t, latents, **_scheduler_step_extra_kwargs, return_dict=False)[0]
@@ -2255,18 +2027,22 @@ def build_batch_2d_rope(
             base=base, base_rescale_factor=base_rescale_factor,
             return_all_pos=return_all_pos,
         )
-        if return_all_pos:
+        if isinstance(res, tuple) and len(res) == 3:
             cos, sin, all_pos = res
-        else:
+        elif isinstance(res, tuple) and len(res) == 2:
             cos, sin = res
             all_pos = None
+        else:
+            raise ValueError(
+                "build_2d_rope must return a tuple of length 2 or 3 "
+                f"when return_all_pos={return_all_pos}, got: {type(res)} with length "
+                f"{len(res) if isinstance(res, tuple) else 'N/A'}"
+            )
         cos_list.append(cos)
         sin_list.append(sin)
         all_pos_list.append(all_pos)
-
     stacked_cos = torch.stack(cos_list, dim=0)
     stacked_sin = torch.stack(sin_list, dim=0)
-
     if return_all_pos:
         return stacked_cos, stacked_sin, all_pos_list
 
