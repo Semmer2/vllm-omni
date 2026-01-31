@@ -19,32 +19,6 @@ from transformers import Siglip2ImageProcessorFast
 
 from .tokenizer_wrapper import ImageInfo, JointImageInfo, ResolutionGroup
 
-
-def resize_and_crop(image: Image.Image, target_size: Tuple[int, int]) -> Image.Image:
-    tw, th = target_size
-    w, h = image.size
-
-    tr = th / tw
-    r = h / w
-
-    # resize
-    if r < tr:
-        resize_height = th
-        resize_width = int(round(th / h * w))
-    else:
-        resize_width = tw
-        resize_height = int(round(tw / w * h))
-
-    image = image.resize((resize_width, resize_height), resample=Image.Resampling.LANCZOS)
-
-    # center crop
-    crop_top = int(round((resize_height - th) / 2.0))
-    crop_left = int(round((resize_width - tw) / 2.0))
-
-    image = image.crop((crop_left, crop_top, crop_left + tw, crop_top + th))
-    return image
-
-
 class HunyuanImage3ImageProcessor(object):
     def __init__(self, config):
         self.config = config
@@ -86,40 +60,3 @@ class HunyuanImage3ImageProcessor(object):
             token_width=token_width, token_height=token_height, base_size=base_size, ratio_index=ratio_idx,
         )
         return image_info
-
-    def preprocess(self, image: Image.Image):
-        # ==== VAE processor ====
-        image_width, image_height = self.reso_group.get_target_size(image.width, image.height)
-        resized_image = resize_and_crop(image, (image_width, image_height))
-        image_tensor = self.vae_processor(resized_image)
-        token_height = image_height // (self.config.vae_downsample_factor[0] * self.config.patch_size)
-        token_width = image_width // (self.config.vae_downsample_factor[1] * self.config.patch_size)
-        base_size, ratio_index = self.reso_group.get_base_size_and_ratio_index(width=image_width, height=image_height)
-        vae_image_info = ImageInfo(
-            image_type="vae",
-            image_tensor=image_tensor.unsqueeze(0),     # include batch dim
-            image_width=image_width, image_height=image_height,
-            token_width=token_width, token_height=token_height,
-            base_size=base_size, ratio_index=ratio_index,
-        )
-
-        # ==== ViT processor ====
-        inputs = self.vision_encoder_processor(image)
-        image = inputs["pixel_values"].squeeze(0)  # seq_len x dim
-        pixel_attention_mask = inputs["pixel_attention_mask"].squeeze(0)  # seq_len
-        spatial_shapes = inputs["spatial_shapes"].squeeze(0)  # 2  (h, w)
-        vision_encoder_kwargs = dict(
-            pixel_attention_mask=pixel_attention_mask,
-            spatial_shapes=spatial_shapes,
-        )
-        vision_image_info = ImageInfo(
-            image_type="vit",
-            image_tensor=image.unsqueeze(0),  # 1 x seq_len x dim
-            image_width=spatial_shapes[1].item() * self.config.vit_processor["patch_size"],
-            image_height=spatial_shapes[0].item() * self.config.vit_processor["patch_size"],
-            token_width=spatial_shapes[1].item(),
-            token_height=spatial_shapes[0].item(),
-            image_token_length=self.config.vit_processor["max_num_patches"],
-            # may not equal to token_width * token_height
-        )
-        return JointImageInfo(vae_image_info, vision_image_info, vision_encoder_kwargs)

@@ -27,15 +27,6 @@ from diffusers.utils import BaseOutput
 def default(value, default_value):
     return value if value is not None else default_value
 
-
-def ensure_list(value):
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return [value]
-
-
 class Resolution(object):
     def __init__(self, size, *args):
         if isinstance(size, str):
@@ -229,54 +220,8 @@ class ImageInfo:
                 image_height=self.image_height,
                 image_width=self.image_width,
             )
-        elif self.image_type in ["vit"]:
-            return dict(
-                token_length=self.image_token_length,
-                use_front_boi_token=self.use_front_boi_token,
-                add_image_shape_token=self.add_image_shape_token,
-                # for rope 2d
-                token_height=self.token_height,
-                token_width=self.token_width,
-                # for bc
-                image_height=self.image_height,
-                image_width=self.image_width,
-            )
         else:
             raise ValueError(f"Unknown image type '{self.image_type}'")
-
-    @property
-    def num_special_tokens(self):
-        if self.args is None:
-            raise ValueError("meta_info requires `args` attribute to be set.")
-        if self.image_type in ["vae", "src_image", "gen_image"]:
-            count = (
-                    2 +  # <boi> + <eoi> or <src_boi> + <src_eoi>
-                    (1 if self.add_timestep_token else 0) +
-                    (1 if self.add_guidance_token else 0) +
-                    (2 if self.add_image_shape_token else 0)
-            )
-        else:
-            raise ValueError(f"Unknown image_type: {self.image_type}")
-        return count
-
-    def copy(self, copy_image_tensor=True):
-        if copy_image_tensor and self.image_tensor is None:
-            raise ValueError("image_tensor is None, cannot copy")
-        return ImageInfo(
-            image_type=self.image_type,
-            image_tensor=self.image_tensor.clone() if copy_image_tensor else None,
-            image_width=self.image_width,
-            image_height=self.image_height,
-            token_width=self.token_width,
-            token_height=self.token_height,
-            image_token_length=self.image_token_length,
-            base_size=self.base_size,
-            ratio_index=self.ratio_index,
-        )
-
-    def zeros_(self):
-        self.image_tensor = torch.zeros_like(self.image_tensor)
-
 
 class ImageTensor(torch.Tensor):
     # This class is just for type hinting purposes. Attribute `i` should be defined
@@ -540,13 +485,6 @@ class TokenizerWrapper(object):
             extra_token_pos['guidance'].append(token_count)
             token_count += 1
         return token_count
-
-    @staticmethod
-    def _shorten_text(text):
-        import re
-        text = re.sub(r"(<img>)+", lambda m: f"[<img>]{{{len(m.group(0)) // 5}}}", text)
-        text = re.sub(r"(<pad>)+", lambda m: f"[<pad>]{{{len(m.group(0)) // 5}}}", text)
-        return text
 
     def encode_sequence(
             self,

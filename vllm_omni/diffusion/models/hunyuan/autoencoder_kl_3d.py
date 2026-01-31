@@ -58,39 +58,6 @@ class DiagonalGaussianDistribution(object):
         x = self.mean + self.std * sample
         return x
 
-    def kl(self, other: "DiagonalGaussianDistribution" = None) -> torch.Tensor:
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        else:
-            reduce_dim = list(range(1, self.mean.ndim))
-            if other is None:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
-                    dim=reduce_dim,
-                )
-            else:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean - other.mean, 2) / other.var +
-                    self.var / other.var -
-                    1.0 -
-                    self.logvar +
-                    other.logvar,
-                    dim=reduce_dim,
-                )
-
-    def nll(self, sample: torch.Tensor, dims: Tuple[int, ...] = [1, 2, 3]) -> torch.Tensor:
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        logtwopi = np.log(2.0 * np.pi)
-        return 0.5 * torch.sum(
-            logtwopi + self.logvar + torch.pow(sample - self.mean, 2) / self.var,
-            dim=dims,
-        )
-
-    def mode(self) -> torch.Tensor:
-        return self.mean
-
-
 @dataclass
 class DecoderOutput(BaseOutput):
     sample: torch.FloatTensor
@@ -212,26 +179,6 @@ class ResnetBlock(nn.Module):
             x = self.nin_shortcut(x)
         return x + h
 
-
-class Downsample(nn.Module):
-    def __init__(self, in_channels: int, add_temporal_downsample: bool = True):
-        super().__init__()
-        self.add_temporal_downsample = add_temporal_downsample
-        stride = (2, 2, 2) if add_temporal_downsample else (1, 2, 2)  # THW
-        # no asymmetric padding in torch conv, must do it ourselves
-        self.conv = Conv3d(in_channels, in_channels, kernel_size=3, stride=stride, padding=0)
-
-    def forward(self, x: Tensor):
-        spatial_pad = (0, 1, 0, 1, 0, 0)  # WHT
-        x = nn.functional.pad(x, spatial_pad, mode="constant", value=0)
-
-        temporal_pad = (0, 0, 0, 0, 0, 1) if self.add_temporal_downsample else (0, 0, 0, 0, 1, 1)
-        x = nn.functional.pad(x, temporal_pad, mode="replicate")
-
-        x = self.conv(x)
-        return x
-
-
 class DownsampleDCAE(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, add_temporal_downsample: bool = True):
         super().__init__()
@@ -251,20 +198,6 @@ class DownsampleDCAE(nn.Module):
         B, C, T, H, W = shortcut.shape
         shortcut = shortcut.view(B, h.shape[1], self.group_size, T, H, W).mean(dim=2)
         return h + shortcut
-
-
-class Upsample(nn.Module):
-    def __init__(self, in_channels: int, add_temporal_upsample: bool = True):
-        super().__init__()
-        self.add_temporal_upsample = add_temporal_upsample
-        self.scale_factor = (2, 2, 2) if add_temporal_upsample else (1, 2, 2)  # THW
-        self.conv = Conv3d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
-
-    def forward(self, x: Tensor):
-        x = nn.functional.interpolate(x, scale_factor=self.scale_factor, mode="nearest")
-        x = self.conv(x)
-        return x
-
 
 class UpsampleDCAE(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, add_temporal_upsample: bool = True):
@@ -520,41 +453,11 @@ class AutoencoderKLConv3D(ModelMixin, ConfigMixin):
 
         # use torch.compile for faster encode speed
         self.use_compile = False
-
+    
     def _set_gradient_checkpointing(self, module, value=False):
         if isinstance(module, (Encoder, Decoder)):
             module.gradient_checkpointing = value
-
-    def enable_tiling_during_training(self, use_tiling: bool = True):
-        self.use_tiling_during_training = use_tiling
-
-    def disable_tiling_during_training(self):
-        self.enable_tiling_during_training(False)
-
-    def enable_temporal_tiling(self, use_tiling: bool = True):
-        self.use_temporal_tiling = use_tiling
-
-    def disable_temporal_tiling(self):
-        self.enable_temporal_tiling(False)
-
-    def enable_spatial_tiling(self, use_tiling: bool = True):
-        self.use_spatial_tiling = use_tiling
-
-    def disable_spatial_tiling(self):
-        self.enable_spatial_tiling(False)
-
-    def enable_tiling(self, use_tiling: bool = True):
-        self.enable_spatial_tiling(use_tiling)
-
-    def disable_tiling(self):
-        self.disable_spatial_tiling()
-
-    def enable_slicing(self):
-        self.use_slicing = True
-
-    def disable_slicing(self):
-        self.use_slicing = False
-
+            
     def blend_h(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int):
         blend_extent = min(a.shape[-1], b.shape[-1], blend_extent)
         for x in range(blend_extent):
@@ -568,65 +471,6 @@ class AutoencoderKLConv3D(ModelMixin, ConfigMixin):
             b[:, :, :, y, :] = \
                 a[:, :, :, -blend_extent + y, :] * (1 - y / blend_extent) + b[:, :, :, y, :] * (y / blend_extent)
         return b
-
-    def blend_t(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int):
-        blend_extent = min(a.shape[-3], b.shape[-3], blend_extent)
-        for x in range(blend_extent):
-            b[:, :, x, :, :] = \
-                a[:, :, -blend_extent + x, :, :] * (1 - x / blend_extent) + b[:, :, x, :, :] * (x / blend_extent)
-        return b
-
-    def spatial_tiled_encode(self, x: torch.Tensor):
-        """ spatial tailing for frames """
-        B, C, T, H, W = x.shape
-        overlap_size = int(self.tile_sample_min_size * (1 - self.tile_overlap_factor))  # 256 * (1 - 0.25) = 192
-        blend_extent = int(self.tile_latent_min_size * self.tile_overlap_factor)  # 8 * 0.25 = 2
-        row_limit = self.tile_latent_min_size - blend_extent  # 8 - 2 = 6
-
-        rows = []
-        for i in range(0, H, overlap_size):
-            row = []
-            for j in range(0, W, overlap_size):
-                tile = x[:, :, :, i: i + self.tile_sample_min_size, j: j + self.tile_sample_min_size]
-                tile = self.encoder(tile)
-                row.append(tile)
-            rows.append(row)
-        result_rows = []
-        for i, row in enumerate(rows):
-            result_row = []
-            for j, tile in enumerate(row):
-                if i > 0:
-                    tile = self.blend_v(rows[i - 1][j], tile, blend_extent)
-                if j > 0:
-                    tile = self.blend_h(row[j - 1], tile, blend_extent)
-                result_row.append(tile[:, :, :, :row_limit, :row_limit])
-            result_rows.append(torch.cat(result_row, dim=-1))
-        moments = torch.cat(result_rows, dim=-2)
-        return moments
-
-    def temporal_tiled_encode(self, x: torch.Tensor):
-        """ temporal tailing for frames """
-        B, C, T, H, W = x.shape
-        overlap_size = int(self.tile_sample_min_tsize * (1 - self.tile_overlap_factor))  # 64 * (1 - 0.25) = 48
-        blend_extent = int(self.tile_latent_min_tsize * self.tile_overlap_factor)  # 8 * 0.25 = 2
-        t_limit = self.tile_latent_min_tsize - blend_extent  # 8 - 2 = 6
-
-        row = []
-        for i in range(0, T, overlap_size):
-            tile = x[:, :, i: i + self.tile_sample_min_tsize, :, :]
-            if self.use_spatial_tiling and (
-                    tile.shape[-1] > self.tile_sample_min_size or tile.shape[-2] > self.tile_sample_min_size):
-                tile = self.spatial_tiled_encode(tile)
-            else:
-                tile = self.encoder(tile)
-            row.append(tile)
-        result_row = []
-        for i, tile in enumerate(row):
-            if i > 0:
-                tile = self.blend_t(row[i - 1], tile, blend_extent)
-            result_row.append(tile[:, :, :t_limit, :, :])
-        moments = torch.cat(result_row, dim=-3)
-        return moments
 
     def spatial_tiled_decode(self, z: torch.Tensor):
         """ spatial tailing for frames """
@@ -656,7 +500,8 @@ class AutoencoderKLConv3D(ModelMixin, ConfigMixin):
             result_rows.append(torch.cat(result_row, dim=-1))
         dec = torch.cat(result_rows, dim=-2)
         return dec
-
+    '''
+    '''
     def temporal_tiled_decode(self, z: torch.Tensor):
         """ temporal tailing for frames """
         B, C, T, H, W = z.shape
@@ -682,7 +527,7 @@ class AutoencoderKLConv3D(ModelMixin, ConfigMixin):
             result_row.append(tile[:, :, :t_limit, :, :])
         dec = torch.cat(result_row, dim=-3)
         return dec
-
+    
     def encode(self, x: Tensor, return_dict: bool = True):
         """
         Encodes the input by passing through the encoder network.
@@ -727,7 +572,7 @@ class AutoencoderKLConv3D(ModelMixin, ConfigMixin):
             return (posterior,)
 
         return AutoencoderKLOutput(latent_dist=posterior)
-
+    
     def decode(self, z: Tensor, return_dict: bool = True, generator=None):
         """
         Decodes the input by passing through the decoder network.
@@ -754,40 +599,3 @@ class AutoencoderKLConv3D(ModelMixin, ConfigMixin):
             return (decoded,)
 
         return DecoderOutput(sample=decoded)
-
-    def forward(
-        self,
-        sample: torch.Tensor,
-        sample_posterior: bool = False,
-        return_posterior: bool = True,
-        return_dict: bool = True
-    ):
-        posterior = self.encode(sample).latent_dist
-        z = posterior.sample() if sample_posterior else posterior.mode()
-        dec = self.decode(z).sample
-        return DecoderOutput(sample=dec, posterior=posterior) if return_dict else (dec, posterior)
-
-    def random_reset_tiling(self, x: torch.Tensor):
-        if x.shape[-3] == 1:
-            self.disable_spatial_tiling()
-            self.disable_temporal_tiling()
-            return
-
-        # Use fixed shape here
-        min_sample_size = int(1 / self.tile_overlap_factor) * self.ffactor_spatial
-        min_sample_tsize = int(1 / self.tile_overlap_factor) * self.ffactor_temporal
-        sample_size = random.choice([None, 1 * min_sample_size, 2 * min_sample_size, 3 * min_sample_size])
-        if sample_size is None:
-            self.disable_spatial_tiling()
-        else:
-            self.tile_sample_min_size = sample_size
-            self.tile_latent_min_size = sample_size // self.ffactor_spatial
-            self.enable_spatial_tiling()
-
-        sample_tsize = random.choice([None, 1 * min_sample_tsize, 2 * min_sample_tsize, 3 * min_sample_tsize])
-        if sample_tsize is None:
-            self.disable_temporal_tiling()
-        else:
-            self.tile_sample_min_tsize = sample_tsize
-            self.tile_latent_min_tsize = sample_tsize // self.ffactor_temporal
-            self.enable_temporal_tiling()

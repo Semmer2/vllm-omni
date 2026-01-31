@@ -56,7 +56,6 @@ def to_device(data, device):
     else:
         return data
 
-
 class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
     def __init__(self, od_config: OmniDiffusionConfig) -> None:
         self.hf_config = get_config(od_config.model, trust_remote_code=True)
@@ -264,7 +263,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
                 elif isinstance(image_i, list):
                     # time_embed needs a 1-D tensor as input
                     t_i_emb = self.time_embed(t_i)  # n_{i} x d
-                    image_i_seq_list = [], []
+                    image_i_seq_list = []
                     for j in range(len(image_i)):
                         image_ij = image_i[j]
                         if image_ij.dim() == 4:
@@ -720,25 +719,11 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
 
     def _generate(
             self,
-            inputs: Optional[torch.Tensor] = None,
-            generation_config: Optional[GenerationConfig] = None,
-            logits_processor: Optional[LogitsProcessorList] = None,
-            stopping_criteria: Optional[StoppingCriteriaList] = None,
-            prefix_allowed_tokens_fn: Optional[Callable[[int, torch.Tensor], List[int]]] = None,
-            synced_gpus: Optional[bool] = None,
-            assistant_model: Optional["PreTrainedModel"] = None,
-            streamer: Optional["BaseStreamer"] = None,
-            negative_prompt_ids: Optional[torch.Tensor] = None,
-            negative_prompt_attention_mask: Optional[torch.Tensor] = None,
-            use_model_defaults: Optional[bool] = None,
             generator: Optional[List[torch.Generator]] = None,
-            verbose: int = 0,
             **kwargs,
     ):
         mode = kwargs.get("mode", "gen_text")
-
         # verbose > 1 not support
-
         if mode == "gen_text":
             raise NotImplementedError("Not support gen text for hunyuan image")
 
@@ -912,22 +897,15 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         self,
         req: OmniDiffusionRequest,
         prompt: str | list[str] = "",
-        negative_prompt: str | list[str] = "",
         image_size = "auto",
         height: int | None = None,
         width: int | None = None,
-        num_inference_steps: int = 50,
-        seed: int | None = None,
         system_prompt: str | None = None,
         generator: torch.Generator | list[torch.Generator] | None = None,
         **kwargs,
     ) -> DiffusionOutput:
         
         prompt = [p if isinstance(p, str) else (p.get("prompt") or "") for p in req.prompts] or prompt
-        if all(isinstance(p, str) or p.get("negative_prompt") is None for p in req.prompts):
-            negative_prompt = None
-        elif req.prompts:
-            negative_prompt = ["" if isinstance(p, str) else (p.get("negative_prompt") or "") for p in req.prompts]
         generator = req.sampling_params.generator or generator
         height = req.sampling_params.height or height or self.default_sample_size * self.vae_scale_factor
         width = req.sampling_params.width or width or self.default_sample_size * self.vae_scale_factor

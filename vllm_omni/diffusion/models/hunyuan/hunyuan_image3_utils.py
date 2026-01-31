@@ -27,20 +27,6 @@ class HunYuanImageAttentionMeta:
     first_step: bool
     num_actual_tokens: int
 
-
-def create_hunyuan_image_attention_meta(
-    attention_mask: torch.Tensor, num_image_tokens, first_step
-) -> HunYuanImageAttentionMeta:
-    b, _, q_len1, seq_len = attention_mask.shape
-    return HunYuanImageAttentionMeta(
-        query_lens=[q_len1] * b,
-        seq_lens=[seq_len] * b,
-        num_image_tokens=num_image_tokens,
-        first_step=first_step,
-        num_actual_tokens=b * q_len1
-    )
-
-
 # 2.custom Rope2D impl.
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""

@@ -167,7 +167,6 @@ class DiffusionModelRunner:
             and self.cache_backend.is_enabled()
         ):
             self.cache_backend.refresh(self.pipeline, req.sampling_params.num_inference_steps)
-        
 
         with set_forward_context(vllm_config=self.vllm_config, omni_diffusion_config=self.od_config):
             with record_function("pipeline_forward"):

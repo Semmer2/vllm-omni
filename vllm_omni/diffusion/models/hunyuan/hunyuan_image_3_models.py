@@ -79,115 +79,6 @@ except Exception as e:
 
 logger = logging.getLogger(__name__)
 
-def topkgating(
-        logits: Tensor,
-        topk: int,
-        group_limited_greedy: bool = False,
-        n_group: int | None = None,
-        topk_group: int | None = None,
-        norm_topk_prob: bool = True,
-        routed_scaling_factor: float = 1.0,
-        capacity_factor: float = 1.0,
-        drop_tokens: bool = False,
-):
-    logits = logits.float()
-    gates = F.softmax(logits, dim=1)
-
-    if group_limited_greedy:
-        group_shape = list(gates.shape[:-1]) + [n_group, gates.shape[-1] // n_group]
-        group_scores = (
-            gates.reshape(group_shape).max(dim=-1).values
-        )  # [n, n_group]
-        group_idx = torch.topk(
-            group_scores, topk_group, dim=-1, sorted=False
-        )[
-            1
-        ]  # [n, top_k_group]
-        group_mask = torch.zeros_like(group_scores)  # [n, n_group]
-        group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
-        score_mask = (
-            group_mask.unsqueeze(-1)
-            .expand(
-                group_shape
-            )
-            .reshape(list(gates.shape))
-        )  # [n, e]
-        gates = gates.masked_fill(~score_mask.bool(), 0.0)
-
-    num_experts = int(gates.shape[1])
-    # Top-k router probability and corresponding expert indices for each token.
-    # Shape: [tokens_per_group, num_selected_experts].
-    expert_gate, expert_index = torch.topk(gates, topk)
-    expert_mask = F.one_hot(expert_index, num_experts)
-    # For a given token, determine if it was routed to a given expert.
-    # Shape: [tokens_per_group, num_experts]
-    expert_mask_aux = expert_mask.max(dim=-2)[0]
-    tokens_per_group_and_expert = torch.mean(expert_mask_aux.float(), dim=-2)
-    router_prob_per_group_and_expert = torch.mean(gates.float(), dim=-2)
-    l_aux = num_experts ** 2 * torch.mean(tokens_per_group_and_expert * router_prob_per_group_and_expert)
-
-    if drop_tokens:
-        expert_capacity = int(max(topk, topk * gates.shape[0] // gates.shape[1]) * capacity_factor)
-    else:
-        expert_index_flat = expert_index.flatten()
-        tokens_per_expert = torch.bincount(expert_index_flat, minlength=num_experts)
-        expert_capacity = torch.max(tokens_per_expert).item()
-
-    if norm_topk_prob and topk > 1:
-        gates_s = torch.clamp(
-            torch.matmul(expert_mask.float(), gates.unsqueeze(-1)).sum(dim=1), min=torch.finfo(gates.dtype).eps
-        )
-        router_probs = gates / gates_s
-    else:
-        router_probs = gates * routed_scaling_factor
-    # Make num_selected_experts the leading axis to ensure that top-1 choices
-    # have priority over top-2 choices, which have priority over top-3 choices,
-    # etc.
-    expert_index = torch.transpose(expert_index, 0, 1)
-    # Shape: [num_selected_experts * tokens_per_group]
-    expert_index = expert_index.reshape(-1)
-
-    # Create mask out of indices.
-    # Shape: [tokens_per_group * num_selected_experts, num_experts].
-    expert_mask = F.one_hot(expert_index, num_experts).to(torch.int32)
-    exp_counts = torch.sum(expert_mask, dim=0).detach()
-
-    # Experts have a fixed capacity that we cannot exceed. A token's priority
-    # within the expert's buffer is given by the masked, cumulative capacity of
-    # its target expert.
-    # Shape: [tokens_per_group * num_selected_experts, num_experts].
-    token_priority = torch.cumsum(expert_mask, dim=0) * expert_mask - 1
-    # Shape: [num_selected_experts, tokens_per_group, num_experts].
-    token_priority = token_priority.reshape((topk, -1, num_experts))
-    # Shape: [tokens_per_group, num_selected_experts, num_experts].
-    token_priority = torch.transpose(token_priority, 0, 1)
-    # For each token, across all selected experts, select the only non-negative
-    # (unmasked) priority. Now, for group G routing to expert E, token T has
-    # non-negative priority (i.e. token_priority[G,T,E] >= 0) if and only if E
-    # is its targeted expert.
-    # Shape: [tokens_per_group, num_experts].
-    token_priority = torch.max(token_priority, dim=1)[0]
-
-    # Token T can only be routed to expert E if its priority is positive and
-    # less than the expert capacity. One-hot matrix will ignore indices outside
-    # the range [0, expert_capacity).
-    # Shape: [tokens_per_group, num_experts, expert_capacity].
-    valid_mask = torch.logical_and(token_priority >= 0, token_priority < expert_capacity)
-    token_priority = torch.masked_fill(token_priority, ~valid_mask, 0)
-    dispatch_mask = F.one_hot(token_priority, expert_capacity).to(torch.bool)
-    valid_mask = valid_mask.unsqueeze(-1).expand(-1, -1, expert_capacity)
-    dispatch_mask = torch.masked_fill(dispatch_mask, ~valid_mask, 0)
-
-    # The combine array will be used for combining expert outputs, scaled by the
-    # router probabilities. Shape: [num_groups, tokens_per_group, num_experts,
-    # expert_capacity].
-    combine_weights = torch.einsum("...te,...tec->...tec", router_probs, dispatch_mask)
-    exp_counts_capacity = torch.sum(dispatch_mask)
-    exp_capacity_rate = exp_counts_capacity / (logits.shape[0] * topk)
-
-    return [l_aux, exp_capacity_rate], combine_weights, dispatch_mask, exp_counts
-
-
 @dataclass
 class CausalMMOutputWithPast(CausalLMOutputWithPast):
     diffusion_prediction: Optional[torch.Tensor] = None
@@ -458,469 +349,6 @@ class HunyuanImage3Config(PretrainedConfig):
             **kwargs,
         )
 
-
-class HunyuanRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        HunyuanRMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-
-class HunyuanImage3SDPAAttention(nn.Module):
-    """PyTorch SDPA attention implementation using torch.nn.functional.scaled_dot_product_attention"""
-
-    def __init__(self, config: HunyuanImage3Config, layer_idx: int):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.attention_type = 'self'
-
-        self.attention_dropout = config.attention_dropout
-        self.hidden_size = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        # self.head_dim = self.hidden_size // self.num_heads
-        self.head_dim = config.attention_head_dim
-        self.num_key_value_heads = config.num_key_value_heads if config.num_key_value_heads else self.num_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
-        self.is_causal = True
-        self.use_qk_norm = config.use_qk_norm
-        self.use_rotary_pos_emb = config.use_rotary_pos_emb
-        self.hidden_size_q = self.head_dim * self.num_heads
-        self.hidden_size_kv = self.head_dim * self.num_key_value_heads
-
-        # define layers
-        self.qkv_proj = nn.Linear(
-            self.hidden_size,
-            self.hidden_size_q + 2 * self.hidden_size_kv,
-            bias=config.attention_bias
-        )
-        self.o_proj = nn.Linear(self.hidden_size_q, self.hidden_size, bias=config.attention_bias)
-
-        if self.use_qk_norm:
-            self.query_layernorm = HunyuanRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-            self.key_layernorm = HunyuanRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-
-        if self.use_rotary_pos_emb:
-            self._init_rope()
-
-    def _init_rope(self):
-        scaling_type = self.config.rope_scaling["type"]
-        if scaling_type == "custom":
-            # Using custom rotary embedding
-            self.rotary_emb = None
-        else:
-            raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
-
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.reshape(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-
-    def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Cache] = None,
-            output_attentions: bool = False,
-            use_cache: Optional[bool] = False,
-            custom_pos_emb: Optional[Tuple[torch.FloatTensor]] = None,
-            **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
-        if output_attentions:
-            raise NotImplementedError(
-                'HunyuanImage3Model is using HunyuanImage3SDPAAttention,'
-                'but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`.'
-            )
-
-        bsz, q_len, _ = hidden_states.size()
-
-        qkv_states = self.qkv_proj(hidden_states)
-        qkv_states = qkv_states.reshape(bsz, q_len, self.num_key_value_heads, self.num_key_value_groups + 2,
-                                        self.head_dim)
-        query_states, key_states, value_states = torch.split(qkv_states, [self.num_key_value_groups, 1, 1], dim=3)
-
-        query_states = query_states.reshape(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        if self.use_rotary_pos_emb:
-            cos, sin = custom_pos_emb
-            # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            if cos.squeeze().dim() == 2:
-                query_states = rotary_position_embedding(query_states, cos.squeeze(), sin.squeeze(), head_first=True)
-                key_states   = rotary_position_embedding(key_states, cos.squeeze(), sin.squeeze(), head_first=True)
-            else:
-                query_states = rotary_position_embedding(query_states, cos.squeeze()[0], sin.squeeze()[0], head_first=True)
-                key_states   = rotary_position_embedding(key_states, cos.squeeze()[0], sin.squeeze()[0], head_first=True)
-
-
-
-        if self.use_qk_norm:
-            query_states = self.query_layernorm(query_states)
-            key_states = self.key_layernorm(key_states)
-
-        query_states = query_states.to(value_states.dtype)
-        key_states = key_states.to(value_states.dtype)
-
-        if past_key_value is not None:
-            cache_kwargs = {"cache_position": position_ids}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-            query_states = query_states.to(key_states.dtype)
-
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with
-        # custom attn_mask,
-        # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states, key_states, value_states, attn_mask=attention_mask, dropout_p=0.0
-        )
-        attn_output = attn_output.transpose(1, 2).contiguous()
-
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-
-        attn_output = self.o_proj(attn_output)
-
-        return attn_output, None, past_key_value
-
-
-class HunyuanImage3FlashAttention2(HunyuanImage3SDPAAttention):
-
-    def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_value: Optional[Cache] = None,
-            output_attentions: bool = False,
-            use_cache: Optional[bool] = False,
-            custom_pos_emb: Optional[Tuple[torch.FloatTensor]] = None,
-            **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
-        if output_attentions:
-            return super().forward(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_value,
-                output_attentions=output_attentions,
-            )
-
-        bsz, q_len, _ = hidden_states.size()
-
-        qkv_states = self.qkv_proj(hidden_states)
-        qkv_states = qkv_states.reshape(bsz, q_len, self.num_key_value_heads, self.num_key_value_groups + 2,
-                                        self.head_dim)
-        query_states, key_states, value_states = torch.split(qkv_states, [self.num_key_value_groups, 1, 1], dim=3)
-
-        query_states = query_states.reshape(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.reshape(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        if self.use_rotary_pos_emb:
-            cos, sin = custom_pos_emb
-            # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            if cos.squeeze().dim() == 2:
-                query_states = rotary_position_embedding(query_states, cos.squeeze(), sin.squeeze(), head_first=True)
-                key_states   = rotary_position_embedding(key_states, cos.squeeze(), sin.squeeze(), head_first=True)
-            else:
-                query_states = rotary_position_embedding(query_states, cos.squeeze()[0], sin.squeeze()[0], head_first=True)
-                key_states   = rotary_position_embedding(key_states, cos.squeeze()[0], sin.squeeze()[0], head_first=True)
-
-        if self.use_qk_norm:
-            query_states = self.query_layernorm(query_states)
-            key_states = self.key_layernorm(key_states)
-
-        query_states = query_states.to(value_states.dtype)
-        key_states = key_states.to(value_states.dtype)
-
-        if past_key_value is not None:
-            cache_kwargs = {"cache_position": position_ids}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with
-        # custom attn_mask,
-        # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
-
-        target_dtype = key_states.dtype if key_states.dtype in [torch.bfloat16, torch.float16] else torch.bfloat16
-
-        q_fa = query_states.to(target_dtype).transpose(1, 2).contiguous()
-        k_fa = key_states.to(target_dtype).transpose(1, 2).contiguous()
-        v_fa = value_states.to(target_dtype).transpose(1, 2).contiguous()
-
-        mode = kwargs.get("mode", "gen_text")
-        # For gen_text and gen_image, we need to handle the attention differently
-        if mode == "gen_text":
-            if attention_mask is None:
-                attn_output = flash_attn_func(q_fa, k_fa, v_fa, causal=False)   # decode attention
-            else:
-                attn_output = flash_attn_func(q_fa, k_fa, v_fa, causal=True)    # prefill attention
-        else:  # image attention
-            gen_timestep_scatter_index: Optional[torch.Tensor] = kwargs.get("gen_timestep_scatter_index", None)
-            assert gen_timestep_scatter_index is not None, \
-                "When gen_image, `gen_timestep_scatter_index` must be provided."
-            # TODO: batchify
-            timestep_index = gen_timestep_scatter_index[0, 0].item()
-            # When image generation, different attention implementations for the first step and the following steps
-            # help to improve the inference speed.
-            first_step = kwargs.get("first_step", None)
-            if first_step is None:
-                raise ValueError("When gen_image, `first_step` must be provided.")
-            if first_step:
-                casual_len = timestep_index + 1
-                text_query_states = q_fa[:, :casual_len, :, :]
-                text_key_states = k_fa[:, :casual_len, :, :]
-                text_value_states = v_fa[:, :casual_len, :, :]
-                text_attn_output = flash_attn_func(
-                    text_query_states, text_key_states, text_value_states, causal=True)
-                image_query_states = q_fa[:, casual_len:, :, :]
-                image_attn_output = flash_attn_func(image_query_states, k_fa, v_fa, causal=False)
-                attn_output = torch.cat((text_attn_output, image_attn_output), dim=1)
-            else:
-                casual_len = timestep_index + 1
-                timestep_query_states = q_fa[:, 0:1, :, :]
-                timestep_key_states = k_fa[:, :casual_len, :, :]
-                timestep_value_states = v_fa[:, :casual_len, :, :]
-                timestep_attn_output = flash_attn_func(
-                    timestep_query_states, timestep_key_states, timestep_value_states, causal=True)
-                image_query_states = q_fa[:, 1:, :, :]
-                image_attn_output = flash_attn_func(image_query_states, k_fa, v_fa, causal=False)
-                attn_output = torch.cat((timestep_attn_output, image_attn_output), dim=1)
-
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-
-        attn_output = self.o_proj(attn_output)
-
-        return attn_output, None, past_key_value
-
-
-Hunyuan_ATTENTION_CLASSES = {
-    "eager": HunyuanImage3SDPAAttention,
-    "sdpa": HunyuanImage3SDPAAttention,
-    "flash_attention_2": HunyuanImage3FlashAttention2,
-}
-
-
-class HunyuanMLP(nn.Module):
-    def __init__(self, config: HunyuanImage3Config, layer_idx=None, is_shared_mlp=False, is_moe=False):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.hidden_size = config.hidden_size
-        self.hidden_act = config.hidden_act
-
-        self.intermediate_size = config.intermediate_size
-        if is_shared_mlp or is_moe:
-            # 如果是 moe 的话，优先用 moe_intermediate_size
-            if config.moe_intermediate_size is not None:
-                self.intermediate_size = config.moe_intermediate_size \
-                    if isinstance(config.moe_intermediate_size, int) else config.moe_intermediate_size[layer_idx]
-
-            if is_shared_mlp:
-                num_shared_expert = config.num_shared_expert \
-                    if isinstance(config.num_shared_expert, int) else config.num_shared_expert[layer_idx]
-                self.intermediate_size *= num_shared_expert
-
-        self.act_fn = ACT2FN[config.hidden_act]
-        if self.hidden_act == "silu":
-            self.intermediate_size *= 2  # SwiGLU
-            self.gate_and_up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-            self.down_proj = nn.Linear(self.intermediate_size // 2, self.hidden_size, bias=config.mlp_bias)
-        elif self.hidden_act == "gelu":
-            self.gate_and_up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-            self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
-        else:
-            assert False, "other hidden_act are not supported"
-
-    def forward(self, x):
-        if self.hidden_act == "silu":
-            gate_and_up_proj = self.gate_and_up_proj(x)
-            x1, x2 = gate_and_up_proj.chunk(2, dim=2)
-            down_proj = self.down_proj(x1 * self.act_fn(x2))
-            return down_proj
-        elif self.hidden_act == "gelu":
-            intermediate = self.gate_and_up_proj(x)
-            intermediate = self.act_fn(intermediate)
-            output = self.down_proj(intermediate)
-            return output
-        else:
-            assert False, "other hidden_act are not supported"
-
-
-class HunyuanTopKGate(nn.Module):
-    def __init__(self, config: HunyuanImage3Config, layer_idx: Optional[int] = None):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.moe_topk = config.moe_topk if isinstance(config.moe_topk, int) else config.moe_topk[layer_idx]
-        self.drop_tokens = config.moe_drop_tokens
-        self.min_capacity = 8
-        self.random_routing_dropped_token = config.moe_random_routing_dropped_token
-        num_experts = config.num_experts if isinstance(config.num_experts, int) else config.num_experts[layer_idx]
-        self.wg = nn.Linear(config.hidden_size, num_experts, bias=False, dtype=torch.float32)
-
-        # DeepSeek gating args
-        self.routed_scaling_factor = config.routed_scaling_factor
-        self.n_group = config.n_group
-        self.topk_group = config.topk_group
-        self.norm_topk_prob = config.norm_topk_prob
-        self.group_limited_greedy = config.group_limited_greedy
-
-    def forward(self, hidden_states, topk_impl='default'):
-        bsz, seq_len, hidden_size = hidden_states.shape
-
-        if self.wg.weight.dtype == torch.float32:
-            hidden_states = hidden_states.float()
-        logits = self.wg(hidden_states)
-        if topk_impl == 'default':
-            gate_output = topkgating(logits, self.moe_topk, group_limited_greedy=self.group_limited_greedy,
-                                     n_group=self.n_group, topk_group=self.topk_group,
-                                     norm_topk_prob=self.norm_topk_prob,
-                                     routed_scaling_factor=self.routed_scaling_factor,
-                                     capacity_factor=self.config.capacity_factor,
-                                     drop_tokens=self.drop_tokens)
-        elif topk_impl == 'easy':
-            gate_output = self.easy_topk(logits, self.moe_topk)
-        else:
-            raise ValueError(f"Unsupported topk_impl: {topk_impl}")
-
-        return gate_output
-
-    @staticmethod
-    def easy_topk(logits, moe_topk):
-        gates = F.softmax(logits, dim=1)
-        topk_weight_1, expert_index = torch.topk(gates, moe_topk)
-        weight_sums = topk_weight_1.sum(dim=1, keepdim=True)
-        weight_sums = torch.clamp(weight_sums, min=1e-8)
-        topk_weight = topk_weight_1 / weight_sums
-
-        return topk_weight, expert_index
-
-
-class HunyuanMoE(nn.Module):
-    def __init__(self, config: HunyuanImage3Config, layer_idx: Optional[int] = None):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.moe_topk = config.moe_topk
-        self.num_experts = config.num_experts if isinstance(config.num_experts, int) else config.num_experts[layer_idx]
-        if config.use_mixed_mlp_moe:
-            self.shared_mlp = HunyuanMLP(config, layer_idx=layer_idx, is_shared_mlp=True)
-        self.gate = HunyuanTopKGate(config, layer_idx=layer_idx)
-        self.experts = nn.ModuleList(
-            [HunyuanMLP(config, layer_idx=layer_idx, is_shared_mlp=False, is_moe=True) for _ in range(self.num_experts)]
-        )
-
-        self._moe_impl = config.moe_impl
-        # For FlashInfer
-        self.moe_weight = None
-        self.moe_weight_2 = None
-        self._weights_initialized = False
-
-    @property
-    def moe_impl(self):
-        return self._moe_impl
-
-    @moe_impl.setter
-    def moe_impl(self, value):
-        self._moe_impl = value
-        if self._moe_impl == "flashinfer":
-            assert flashinfer is not None, "When using fused_moe, flashinfer must be installed."
-
-    def forward(self, hidden_states):
-        torch.cuda.set_device(hidden_states.device.index)
-        bsz, seq_len, hidden_size = hidden_states.shape
-
-        if self.config.use_mixed_mlp_moe:
-            hidden_states_mlp = self.shared_mlp(hidden_states)
-
-        reshaped_input = hidden_states.reshape(-1, hidden_size) # [bsz*seq_len, hidden_size]
-
-        if self._moe_impl == "flashinfer":
-            # Get expert weights
-            if not self._weights_initialized:
-                self._initialize_weights_on_device(hidden_states.device)
-            topk_weight, topk_index = self.gate(hidden_states, topk_impl='easy')
-
-            combined_output = torch.zeros_like(reshaped_input)
-            _ = flashinfer.fused_moe.cutlass_fused_moe(     # noqa
-                reshaped_input.contiguous(),
-                topk_index.to(torch.int).contiguous(),
-                topk_weight.to(torch.float).contiguous(),
-                self.moe_weight,
-                self.moe_weight_2,
-                torch.bfloat16,
-                output=combined_output,
-                quant_scales=None,
-            )
-        else:
-            # Original implementation - fallback for compatibility
-            l_moe, combine_weights, dispatch_mask, exp_counts = self.gate(hidden_states, topk_impl='default')
-            dispatched_input = torch.einsum("sec,sm->ecm", dispatch_mask.type_as(hidden_states), reshaped_input)
-            chunks = dispatched_input.chunk(self.num_experts, dim=0)
-            expert_outputs = []
-            for chunk, expert in zip(chunks, self.experts):
-                expert_outputs.append(expert(chunk))
-
-            expert_output = torch.cat(expert_outputs, dim=0)
-            combined_output = torch.einsum("sec,ecm->sm", combine_weights.type_as(hidden_states), expert_output)
-
-        combined_output = combined_output.reshape(bsz, seq_len, hidden_size)
-
-        if self.config.use_mixed_mlp_moe:
-            output = hidden_states_mlp + combined_output    # noqa
-        else:
-            output = combined_output
-
-        return output
-
-    def _initialize_weights_on_device(self, device):
-        expert_weights_gate_up = []
-        expert_weights_down = []
-
-        for expert in self.experts:
-            expert.to(device)
-            expert_weights_gate_up.append(expert.gate_and_up_proj.weight.to(device))
-            expert_weights_down.append(expert.down_proj.weight.to(device))
-
-        self.moe_weight = torch.stack(expert_weights_gate_up).contiguous()
-        self.moe_weight_2 = torch.stack(expert_weights_down).contiguous()
-        # empty the expert weights
-        for expert in self.experts:
-            expert.gate_and_up_proj.weight.data = torch.empty(0, device=device)
-            if expert.gate_and_up_proj.bias is not None:
-                expert.gate_and_up_proj.bias.data = torch.empty(0, device=device)
-            expert.down_proj.weight.data = torch.empty(0, device=device)
-            if expert.down_proj.bias is not None:
-                expert.down_proj.bias.data = torch.empty(0, device=device)
-
-        self._weights_initialized = True
-
-
 class HunYuanMLP(nn.Module):
     def __init__(
         self,
@@ -1062,13 +490,6 @@ class HunYuanSparseMoeBlock(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
-
-
-def _get_cla_factor(config: PretrainedConfig) -> int:
-    if not getattr(config, "use_cla", False):
-        return 1
-    return getattr(config, "cla_share_factor", 1)
-
 
 class HunYuanAttention(nn.Module):
     def __init__(
@@ -1217,119 +638,6 @@ class HunYuanAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         output = output.reshape(bsz, q_len, -1)
         return output, None, past_key_value
-
-
-class HunYuanCrossAttention(nn.Module):
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
-        max_position_embeddings: int = 8192,
-        quant_config: QuantizationConfig | None = None,
-        bias: bool = False,
-        cache_config: CacheConfig | None = None,
-        prefix: str = "",
-        layer_id: int = -1,
-    ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
-        self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
-        else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        # MistralConfig has an optional head_dim introduced by Mistral-Nemo
-        if hasattr(config, "head_dim"):
-            self.head_dim = config.head_dim
-        elif hasattr(config, "attention_head_dim"):
-            self.head_dim = config.attention_head_dim
-        else:
-            self.head_dim = self.hidden_size // self.total_num_heads
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
-        self.max_position_embeddings = max_position_embeddings
-        self.use_qk_norm = getattr(config, "use_qk_norm", False)
-        self.layer_id = layer_id
-
-        self.q_proj = ColumnParallelLinear(
-            hidden_size,
-            hidden_size,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.q_proj",
-        )
-
-        self.o_proj = RowParallelLinear(
-            input_size=self.total_num_heads * self.head_dim,
-            output_size=hidden_size,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
-
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=max_position_embeddings,
-            rope_parameters=rope_scaling,
-            is_neox_style=True,
-        )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            attn_type=AttentionType.ENCODER_DECODER,
-        )
-
-        if self.use_qk_norm:
-            self.query_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-            self.key_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_states: tuple[torch.Tensor] | None = None,
-    ) -> torch.Tensor:
-        assert kv_states is not None
-        ori_k, v = kv_states  # use last layer kv,
-        k = ori_k
-        q, _ = self.q_proj(hidden_states)
-        k_tmp = torch.empty_like(k)  # Todo: reduant rotary embedding
-        q, _ = self.rotary_emb(positions, q, k_tmp)
-        if self.use_qk_norm:
-            q = self.query_layernorm(
-                q.view(-1, self.num_heads, self.head_dim).contiguous()
-            )
-            k = self.key_layernorm(
-                k.view(-1, self.num_kv_heads, self.head_dim).contiguous()
-            )
-
-        attn_output = self.attn(q, k, v)
-        # For o_proj
-        attn_output = attn_output.view(q.shape[0], -1)
-        output, _ = self.o_proj(attn_output)
-        return output, (ori_k, v)
-
 class HunyuanFusedMoE(SharedFusedMoE):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -1396,23 +704,6 @@ class HunyuanImage3DecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
                 layer_id=layer_idx,
             )
-        elif attention_type == AttentionType.ENCODER_DECODER:
-            self.self_attn = HunYuanCrossAttention(
-                config=config,
-                hidden_size=self.hidden_size,
-                num_heads=config.num_attention_heads,
-                num_kv_heads=getattr(
-                    config, "num_key_value_heads", config.num_attention_heads
-                ),
-                rope_theta=rope_theta,
-                rope_scaling=rope_scaling,
-                max_position_embeddings=max_position_embeddings,
-                quant_config=None,
-                bias=attention_bias,
-                cache_config=None,
-                prefix=f"{prefix}.self_attn",
-                layer_id=layer_idx,
-            )
         else:
             raise RuntimeError(f"Unsupported attention type: {attention_type}")
 
@@ -1423,14 +714,9 @@ class HunyuanImage3DecoderLayer(nn.Module):
         else:
             self.mlp = HunYuanMLP(self.hidden_size, self.intermediate_size,
                                   config.hidden_act)
-        if config.norm_type == 'hf_rms' or config.norm_type == 'rms':
-            self.input_layernorm = HunyuanRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.post_attention_layernorm = HunyuanRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        elif config.norm_type == 'fused' or config.norm_type == 'torch_nn':
-            self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        else:
-            assert False, "other norm_type are not supported"
+            
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
             self,
@@ -1712,6 +998,8 @@ class HunyuanImage3Model(nn.Module):
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
+                if scale_name not in params_dict.keys():
+                    continue
                 # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -1738,6 +1026,9 @@ class HunyuanImage3Model(nn.Module):
                     continue
 
                 if is_pp_missing_parameter(name, self):
+                    continue
+
+                if name not in params_dict.keys():
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -1769,6 +1060,9 @@ class HunyuanImage3Model(nn.Module):
 
                 assert loaded_weight.shape[0] % den == 0
                 units = loaded_weight.shape[0] // den
+
+                if name not in params_dict.keys():
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 offset = 0
@@ -1822,6 +1116,9 @@ class HunyuanImage3Model(nn.Module):
                     #     print(f"name_mapped: {name_mapped}, found_num: {found_num}")
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
+
+                    if name_mapped not in params_dict.keys():
+                        continue
                     param = params_dict[name_mapped]
                     # We should ask the weight loader to return success or not
                     # here since otherwise we may skip experts with other
@@ -1866,6 +1163,9 @@ class HunyuanImage3Model(nn.Module):
                     name = "norm.weight"
                 if name == "wte.weight":
                     name = "embed_tokens.weight"
+
+                if name not in params_dict.keys():
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -1891,8 +1191,6 @@ class HunyuanImage3Model(nn.Module):
             num_image_tokens: Optional[int] = None,
             gen_timestep_scatter_index: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-
-        print("call HunyuanImage3 HunyuanImage3Model forward")
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -1976,7 +1274,6 @@ class FlowMatchDiscreteSchedulerOutput(BaseOutput):
     """
 
     prev_sample: torch.FloatTensor
-
 
 class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
     """
@@ -2066,19 +1363,6 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
     def _sigma_to_t(self, sigma):
         return sigma * self.config.num_train_timesteps
-
-    @property
-    def state_in_first_order(self):
-        return self.derivative_1 is None
-
-    @property
-    def state_in_second_order(self):
-        return self.derivative_2 is None
-
-    @property
-    def state_in_third_order(self):
-        return self.derivative_3 is None
-
     def set_timesteps(self, num_inference_steps: int, device: Union[str, torch.device] = None,
                       n_tokens: int = None):
         """
@@ -2144,16 +1428,6 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
     def scale_model_input(self, sample: torch.Tensor, timestep: Optional[int] = None) -> torch.Tensor:
         return sample
-
-    @staticmethod
-    def get_lin_function(x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15):
-        m = (y2 - y1) / (x2 - x1)
-        b = y1 - m * x1
-        return lambda x: m * x + b
-
-    @staticmethod
-    def flux_time_shift(mu: float, sigma: float, t: torch.Tensor):
-        return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
     def sd3_time_shift(self, t: torch.Tensor):
         return (self.config.shift * t) / (1 + (self.config.shift - 1) * t)
@@ -2247,87 +1521,9 @@ class FlowMatchDiscreteScheduler(SchedulerMixin, ConfigMixin):
         dt = sigma_next - sigma
         return derivative, dt, sample, True
 
-    def second_order_method(self, model_output, sigma, sigma_next, sample):
-        if self.state_in_first_order:
-            # store for 2nd order step
-            self.derivative_1 = model_output
-            self.dt = sigma_next - sigma
-            self.sample = sample
-
-            derivative = model_output
-            if self.config.solver == 'heun-2':
-                dt = self.dt
-            elif self.config.solver == 'midpoint-2':
-                dt = self.dt / 2
-            else:
-                raise NotImplementedError(f"Solver {self.config.solver} not supported.")
-            last_inner_step = False
-
-        else:
-            if self.config.solver == 'heun-2':
-                derivative = 0.5 * (self.derivative_1 + model_output)
-            elif self.config.solver == 'midpoint-2':
-                derivative = model_output
-            else:
-                raise NotImplementedError(f"Solver {self.config.solver} not supported.")
-
-            # 3. take prev timestep & sample
-            dt = self.dt
-            sample = self.sample
-            last_inner_step = True
-
-            # free dt and derivative
-            # Note, this puts the scheduler in "first order mode"
-            self.derivative_1 = None
-            self.dt = None
-            self.sample = None
-
-        return derivative, dt, sample, last_inner_step
-
-    def fourth_order_method(self, model_output, sigma, sigma_next, sample):
-        if self.state_in_first_order:
-            self.derivative_1 = model_output
-            self.dt = sigma_next - sigma
-            self.sample = sample
-            derivative = model_output
-            dt = self.dt / 2
-            last_inner_step = False
-
-        elif self.state_in_second_order:
-            self.derivative_2 = model_output
-            derivative = model_output
-            dt = self.dt / 2
-            last_inner_step = False
-
-        elif self.state_in_third_order:
-            self.derivative_3 = model_output
-            derivative = model_output
-            dt = self.dt
-            last_inner_step = False
-
-        else:
-            derivative = (1/6 * self.derivative_1 + 1/3 * self.derivative_2 + 1/3 * self.derivative_3 +
-                          1/6 * model_output)
-
-            # 3. take prev timestep & sample
-            dt = self.dt
-            sample = self.sample
-            last_inner_step = True
-
-            # free dt and derivative
-            # Note, this puts the scheduler in "first order mode"
-            self.derivative_1 = None
-            self.derivative_2 = None
-            self.derivative_3 = None
-            self.dt = None
-            self.sample = None
-
-        return derivative, dt, sample, last_inner_step
-
     def __len__(self):
-        return self.config.num_train_timesteps
-
-
+        return self.config.num_train_timestepsclass
+    
 class ClassifierFreeGuidance:
     def __init__(
         self,
@@ -2422,32 +1618,6 @@ def real_batched_index_select(t, dim, idx):
 @dataclass
 class HunyuanImage3Text2ImagePipelineOutput(BaseOutput):
     samples: Union[List[Any], np.ndarray]
-
-
-def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
-    r"""
-    Rescales `noise_cfg` tensor based on `guidance_rescale` to improve image quality and fix overexposure. Based on
-    Section 3.4 from [Common Diffusion Noise Schedules and Sample Steps are
-    Flawed](https://arxiv.org/pdf/2305.08891.pdf).
-
-    Args:
-        noise_cfg (`torch.Tensor`):
-            The predicted noise tensor for the guided diffusion process.
-        noise_pred_text (`torch.Tensor`):
-            The predicted noise tensor for the text-guided diffusion process.
-        guidance_rescale (`float`, *optional*, defaults to 0.0):
-            A rescale factor applied to the noise predictions.
-    Returns:
-        noise_cfg (`torch.Tensor`): The rescaled noise prediction tensor.
-    """
-    std_text = noise_pred_text.std(dim=list(range(1, noise_pred_text.ndim)), keepdim=True)
-    std_cfg = noise_cfg.std(dim=list(range(1, noise_cfg.ndim)), keepdim=True)
-    # rescale the results from guidance (fixes overexposure)
-    noise_pred_rescaled = noise_cfg * (std_text / std_cfg)
-    # mix with the original results from guidance by factor guidance_rescale to avoid "plain looking" images
-    noise_cfg = guidance_rescale * noise_pred_rescaled + (1 - guidance_rescale) * noise_cfg
-    return noise_cfg
-
 
 class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
     r"""
@@ -2680,8 +1850,6 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
                 If `return_dict` is `True`, [`~DiffusionPipelineOutput`] is returned,
                 otherwise a `tuple` is returned where the first element is a list with the generated samples.
         """
-
-        print("call HunyuanImage3 HunyuanImage3Text2ImagePipeline forward")
         callback_steps = kwargs.pop("callback_steps", None)
         pbar_steps = kwargs.pop("pbar_steps", None)
 
@@ -3148,15 +2316,7 @@ class ResBlock(nn.Module):
         )
 
         self.updown = up or down
-
-        if up:
-            self.h_upd = Upsample(self.in_channels, False, dims, **factory_kwargs)
-            self.x_upd = Upsample(self.in_channels, False, dims, **factory_kwargs)
-        elif down:
-            self.h_upd = Downsample(self.in_channels, False, dims, **factory_kwargs)
-            self.x_upd = Downsample(self.in_channels, False, dims, **factory_kwargs)
-        else:
-            self.h_upd = self.x_upd = nn.Identity()
+        self.h_upd = self.x_upd = nn.Identity()
 
         self.emb_layers = nn.Sequential(
             nn.SiLU(),
