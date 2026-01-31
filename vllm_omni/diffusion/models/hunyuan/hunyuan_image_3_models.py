@@ -19,8 +19,6 @@ from vllm_omni.diffusion.attention.layer import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.config import CacheConfig
 from vllm.distributed import (
-    get_ep_group,
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -960,7 +958,6 @@ class HunyuanImage3Model(nn.Module):
 
     # rename for delay load
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        tp_rank = get_tensor_model_parallel_rank()
         cla_factor = _get_cla_factor(self.config)
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)

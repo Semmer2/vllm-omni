@@ -544,11 +544,6 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         # 6. Build kv cache
         if bot_task == "img_ratio":
             max_new_tokens = 1
-        if mode == "gen_image":
-            # Image generation will not extend sequence length, using token length as max_cache_len is enough.
-            max_cache_len = output.tokens.shape[1]
-        else:
-            max_cache_len = output.tokens.shape[1] + default(max_new_tokens, self.generation_config.max_length)
 
         # 7. Build position ids
         batch_input_pos = torch.arange(
