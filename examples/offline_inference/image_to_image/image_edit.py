@@ -154,6 +154,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--tensor_parallel_size",
+        type=int,
+        default=1,
+        help="Number of GPUs used for tensor parallelism.",
+    )
+    parser.add_argument(
         "--ulysses_degree",
         type=int,
         default=1,
@@ -273,7 +279,12 @@ def main():
     # Enable VAE memory optimizations on NPU
     vae_use_slicing = is_npu()
     vae_use_tiling = is_npu()
-    parallel_config = DiffusionParallelConfig(ulysses_degree=args.ulysses_degree, ring_degree=args.ring_degree)
+    parallel_config = DiffusionParallelConfig(
+        tensor_parallel_size=args.tensor_parallel_size,
+        ulysses_degree=args.ulysses_degree,
+        ring_degree=args.ring_degree,
+        enable_expert_parallel=True,
+        )
     # Configure cache based on backend type
     cache_config = None
     if args.cache_backend == "cache_dit":

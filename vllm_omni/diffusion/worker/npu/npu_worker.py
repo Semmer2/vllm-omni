@@ -71,6 +71,7 @@ class NPUWorker(GPUWorker):
         vllm_config = VllmConfig(model_config=vllm_model_config)
         vllm_config.parallel_config.tensor_parallel_size = self.od_config.parallel_config.tensor_parallel_size
         vllm_config.parallel_config.data_parallel_size = self.od_config.parallel_config.data_parallel_size
+        vllm_config.parallel_config.enable_expert_parallel = self.od_config.parallel_config.enable_expert_parallel
         self.vllm_config = vllm_config
         with (
             set_current_omni_diffusion_config(self.od_config),

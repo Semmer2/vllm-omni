@@ -131,7 +131,8 @@ def main():
     # assert args.ring_degree == 1, "Ring attention is not supported yet"
     parallel_config = DiffusionParallelConfig(tensor_parallel_size=args.tensor_parallel_size,
                                               ulysses_degree=args.ulysses_degree,
-                                              ring_degree=args.ring_degree)
+                                              ring_degree=args.ring_degree,
+                                              enable_expert_parallel=True)
     omni = Omni(
         model=args.model,
         vae_use_slicing=vae_use_slicing,

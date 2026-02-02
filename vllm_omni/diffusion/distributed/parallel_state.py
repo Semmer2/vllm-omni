@@ -687,7 +687,6 @@ def initialize_model_parallel(
     )
     global _PP
     assert _PP is None, "pipeline model parallel group is already initialized"
-    print("---------init PP-------------")
     _PP = init_model_parallel_group(
         group_ranks=rank_generator.get_ranks("pp"),
         local_rank=get_world_group().local_rank,
@@ -714,6 +713,7 @@ def initialize_model_parallel(
     )
 
     assert vllm_parallel_state._TP is None, "Tensor parallel group is already initialized"
+    print("---------init TP-------------")
     vllm_parallel_state._TP = init_model_parallel_group(
         group_ranks=rank_generator.get_ranks("tp"),
         local_rank=get_world_group().local_rank,

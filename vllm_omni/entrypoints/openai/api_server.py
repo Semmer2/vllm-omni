@@ -618,6 +618,7 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
 
     try:
         # Build params - pass through user values directly
+        # looks like current code do not support image to image req?
         gen_params = {
             "prompt": request.prompt,
             "num_outputs_per_prompt": request.n,
