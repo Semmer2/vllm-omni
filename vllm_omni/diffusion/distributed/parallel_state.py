@@ -459,6 +459,7 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
+        vllm_parallel_state._WORLD = _WORLD
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size"
@@ -857,6 +858,13 @@ def initialize_model_parallel(
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+
+    if hasattr(torch, 'npu') and torch.npu.is_available():
+        import vllm_ascend.distributed.parallel_state as vllm_ascend_parallel_state
+        if vllm_ascend_parallel_state._MC2:
+            vllm_ascend_parallel_state._MC2.destroy()
+        vllm_ascend_parallel_state._MC2 = None
+
     global _DP
     if _DP:
         _DP.destroy()
@@ -896,6 +904,7 @@ def destroy_distributed_environment():
     if _WORLD:
         _WORLD.destroy()
     _WORLD = None
+    vllm_parallel_state._WORLD = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
