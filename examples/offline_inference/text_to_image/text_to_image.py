@@ -125,6 +125,11 @@ def parse_args() -> argparse.Namespace:
         help="Number of GPUs used for tensor parallelism (TP) inside the DiT.",
     )
     parser.add_argument(
+        "--enable_expert_parallel",
+        action="store_true",
+        help="Enable expert parallelism for MoE layers.",
+    )
+    parser.add_argument(
         "--vae_use_slicing",
         action="store_true",
         help="Enable VAE slicing for memory optimization.",
@@ -176,6 +181,7 @@ def main():
         ring_degree=args.ring_degree,
         cfg_parallel_size=args.cfg_parallel_size,
         tensor_parallel_size=args.tensor_parallel_size,
+        enable_expert_parallel=args.enable_expert_parallel,
     )
 
     # Check if profiling is requested via environment variable
@@ -207,7 +213,7 @@ def main():
     print(f"  Cache backend: {args.cache_backend if args.cache_backend else 'None (no acceleration)'}")
     print(
         f"  Parallel configuration: tensor_parallel_size={args.tensor_parallel_size}, "
-        f"ulysses_degree={args.ulysses_degree}, ring_degree={args.ring_degree}, cfg_parallel_size={args.cfg_parallel_size}"
+        f"ulysses_degree={args.ulysses_degree}, ring_degree={args.ring_degree}, cfg_parallel_size={args.cfg_parallel_size}, enable_expert_parallel: {args.enable_expert_parallel}"
     )
     print(f"  Image size: {args.width}x{args.height}")
     print(f"{'=' * 60}\n")
