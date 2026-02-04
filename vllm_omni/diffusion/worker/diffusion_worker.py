@@ -103,6 +103,7 @@ class DiffusionWorker:
         vllm_config = VllmConfig(compilation_config=CompilationConfig())
         vllm_config.parallel_config.tensor_parallel_size = self.od_config.parallel_config.tensor_parallel_size
         vllm_config.parallel_config.data_parallel_size = self.od_config.parallel_config.data_parallel_size
+        vllm_config.parallel_config.enable_expert_parallel = self.od_config.parallel_config.enable_expert_parallel
         self.vllm_config = vllm_config
 
         # Initialize distributed environment
@@ -123,6 +124,7 @@ class DiffusionWorker:
                 tensor_parallel_size=parallel_config.tensor_parallel_size,
                 pipeline_parallel_size=parallel_config.pipeline_parallel_size,
                 fully_shard_degree=parallel_config.hsdp_shard_size if parallel_config.use_hsdp else 1,
+                enable_expert_parallel=parallel_config.enable_expert_parallel,
             )
             init_workspace_manager(self.device)
 
