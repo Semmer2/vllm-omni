@@ -1,6 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+"""
+vllm-ascend/vllm_ascend/ops/fused_moe/token_dispatcher.py
+if token_dispatch wrong, consider to change as
+class TokenDispatcherWithAllGather(MoETokenDispatcher):
+def token_dispatch
+        sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = (
+            torch_npu.npu_moe_init_routing_v2(
+                hidden_states,
+                topk_ids,
+                scale=pertoken_scale,
+                active_num=num_tokens * self.top_k,
+                expert_num=global_num_experts,
+                expert_tokens_num_type=1,
+                expert_tokens_num_flag=True,
+                active_expert_range=[first_expert_idx, last_expert_idx],
+                quant_mode=1
+                if self.with_quant and pertoken_scale is None else -1,
+            ))
+"""
 import glob
 import inspect
 import logging
@@ -65,6 +83,24 @@ from vllm.v1.attention.backend import AttentionType
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.distributed.parallel_state import get_pp_group
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
+
+import vllm.forward_context as _vllm_fc
+from typing import Optional, Any
+import torch
+import torch_npu
+
+if hasattr(torch, 'npu') and torch.npu.is_available():
+    if not hasattr(_vllm_fc.ForwardContext, 'moe_comm_method'):
+        # modify __annotations__
+        _vllm_fc.ForwardContext.__annotations__['moe_comm_method'] = Optional[Any]
+        _vllm_fc.ForwardContext.__annotations__['moe_comm_type'] = Optional[Any] 
+        _vllm_fc.ForwardContext.__annotations__['sp_enabled'] = bool
+        _vllm_fc.ForwardContext.__annotations__['in_profile_run'] = bool
+        # default
+        _vllm_fc.ForwardContext.moe_comm_method = None
+        _vllm_fc.ForwardContext.moe_comm_type = None
+        _vllm_fc.ForwardContext.sp_enabled = False
+        _vllm_fc.ForwardContext.in_profile_run = False
 
 logger = logging.getLogger(__name__)
 
@@ -1427,7 +1463,7 @@ class HunYuanSparseMoeBlock(nn.Module):
             final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
 
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
 
@@ -1574,13 +1610,26 @@ class HunYuanAttention(nn.Module):
         output = output.reshape(bsz, q_len, -1)
         return output, None, past_key_value
 
-
-class HunyuanFusedMoE(SharedFusedMoE):
+from vllm_ascend.ops.fused_moe.fused_moe import AscendSharedFusedMoE
+class HunyuanFusedMoE(AscendSharedFusedMoE):
     def __init__(self, *, prefix: str = "", **kwargs):
+        from vllm_omni.diffusion.forward_context import get_forward_context as omni_get_ctx
+        from vllm_ascend.ascend_config import init_ascend_config
+        from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods, MoECommType
+        #omni_ctx = omni_get_ctx()
+        #vllm_config = omni_ctx.vllm_config
+        #init_ascend_config(vllm_config)
         super().__init__(prefix=prefix, **kwargs)
         self._prefix = prefix
-
         self._init_hook_handle = self.register_forward_pre_hook(self._initialize_kernel_hook, with_kwargs=True)
+        from vllm_ascend.ascend_config import get_ascend_config
+        ascend_config = get_ascend_config()
+        if getattr(ascend_config, 'moe_comm_type', None) == "mc2":
+            self._moe_comm_type = MoECommType.MC2
+        else:
+            self._moe_comm_type = MoECommType.ALLTOALL
+        self._moe_comm_method = _MoECommMethods.get(self._moe_comm_type)
+
 
     def _initialize_kernel_hook(self, module, args, kwargs):
         if self.quant_method:
@@ -1591,6 +1640,11 @@ class HunyuanFusedMoE(SharedFusedMoE):
         from vllm.model_executor.layers.fused_moe.layer import get_forward_context
 
         ctx = get_forward_context()
+        if ctx is not None:
+            ctx.moe_comm_method = self._moe_comm_method
+            ctx.moe_comm_type = self._moe_comm_type
+            ctx.sp_enabled = False  
+            ctx.in_profile_run = False
         if not ctx.remaining_moe_layers:
             import re
 
@@ -2444,7 +2498,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
                     **model_kwargs,
                 )
 
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                with torch.autocast(device_type="npu", dtype=torch.bfloat16, enabled=True):
                     model_output = self.model.forward_call(**model_inputs, first_step=(i == 0))
                     pred = model_output["diffusion_prediction"]
                 pred = pred.to(dtype=torch.float32)
@@ -2478,7 +2532,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
                     callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
 
                     latents = callback_outputs.pop("latents", latents)
-
+                #latents = latents.to(torch.bfloat16)
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
@@ -2491,7 +2545,7 @@ class HunyuanImage3Text2ImagePipeline(DiffusionPipeline):
         if hasattr(self.vae, "ffactor_temporal"):
             latents = latents.unsqueeze(2)
 
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+        with torch.autocast(device_type="npu", dtype=torch.float16, enabled=True):
             image = self.vae.decode(latents, return_dict=False, generator=generator)[0]
 
         if hasattr(self.vae, "ffactor_temporal"):

@@ -35,6 +35,7 @@ from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion import envs
+from vllm_omni.diffusion.forward_context import get_forward_context
 from vllm_omni.platforms import current_omni_platform
 
 from .group_coordinator import (
@@ -51,7 +52,7 @@ logger = init_logger(__name__)
 
 
 _WORLD: GroupCoordinator | None = None
-# get _TP from vllm.distributed.parallel_state
+# get _TP&_EP from vllm.distributed.parallel_state
 _SP: SequenceParallelGroupCoordinator | None = None
 _PP: PipelineGroupCoordinator | None = None
 _CFG: GroupCoordinator | None = None
@@ -183,8 +184,11 @@ class RankGenerator:
         self.pp = pp
         self.cfg = cfg
         self.dp = dp
+        # self.ep = 1  # no matter EP enabled, EP stride should always be 1
         self.rank_offset = rank_offset
         self.world_size = tp * sp * pp * cfg * dp
+        self.ep = tp * sp * cfg * dp # EP level exclude PP
+
 
         self.name_to_size = {
             "tp": self.tp,
@@ -192,6 +196,7 @@ class RankGenerator:
             "pp": self.pp,
             "cfg": self.cfg,
             "dp": self.dp,
+            "ep": self.ep,
         }
         order = order.lower()
 
@@ -228,6 +233,15 @@ class RankGenerator:
                 '-' to separate them. For example, if we want to obtain
                 the TP_DP group, the token should be 'tp-dp'.
         """
+        if token == "ep":
+            ranks = []
+            num_pp_stages = self.pp
+            for i in range(num_pp_stages):
+                start = i * self.ep + self.rank_offset
+                end = start + self.ep
+                ranks.append(list(range(start, end)))
+            print(f"[bing]ranks={ranks}")
+            return ranks
         mask = self.get_mask(self.order, token)
         ranks = generate_masked_orthogonal_rank_groups(self.world_size, self.ordered_size, mask)
         if self.rank_offset > 0:
@@ -408,6 +422,7 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
+        vllm_parallel_state._WORLD = _WORLD
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size"
@@ -436,6 +451,7 @@ def init_model_parallel_group(
         "data",
         "pipeline",
         "tensor",
+        "expert",
         "sequence",
         "classifier_free_guidance",
     ], f"parallel_mode {parallel_mode} is not supported"
@@ -629,6 +645,7 @@ def initialize_model_parallel(
     ring_degree: int = 1,
     tensor_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
+    enable_expert_parallel: bool = False,
     backend: str | None = None,
 ) -> None:
     if backend is None:
@@ -678,6 +695,9 @@ def initialize_model_parallel(
     world_size: int = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
+    forward_context = get_forward_context()
+    od_config = forward_context.omni_diffusion_config
+
     if sequence_parallel_size is None:
         sequence_parallel_size = ring_degree * ulysses_degree
         logger.info(
@@ -716,7 +736,7 @@ def initialize_model_parallel(
         pipeline_parallel_size,
         cfg_parallel_size,
         data_parallel_size,
-        "tp-sp-pp-cfg-dp",
+        "tp-sp-pp-cfg-dp-ep",
     )
     sp_group_ranks = rank_generator.get_ranks("sp")
     global _DP
@@ -772,11 +792,49 @@ def initialize_model_parallel(
         backend=backend,
         parallel_mode="tensor",
     )
+
+    if enable_expert_parallel:
+        assert od_config.is_moe
+        all_ranks = torch.arange(world_size).reshape(
+            -1, cfg_parallel_size * data_parallel_size, pipeline_parallel_size, tensor_parallel_size
+        )  # noqa
+        group_ranks = (
+            all_ranks.transpose(1, 2)
+            .reshape(-1, cfg_parallel_size * data_parallel_size * tensor_parallel_size)
+            .unbind(0)
+        )
+        group_ranks = [x.tolist() for x in group_ranks]
+        vllm_parallel_state._EP = init_model_parallel_group(
+            group_ranks=rank_generator.get_ranks("ep"),
+            local_rank=get_world_group().local_rank,
+            backend=backend,
+            parallel_mode="expert",
+        )
+
+    if hasattr(torch, 'npu') and torch.npu.is_available():
+        all_ranks = torch.arange(world_size).reshape(
+        -1, data_parallel_size * tensor_parallel_size)
+        group_ranks = all_ranks.unbind(0)
+        group_ranks = [x.tolist() for x in group_ranks]
+        import vllm_ascend.distributed.parallel_state as vllm_ascend_parallel_state
+        from vllm.distributed.parallel_state import init_model_parallel_group as vllm_init_model_parallel_group
+        vllm_ascend_parallel_state._MC2 =  vllm_init_model_parallel_group(group_ranks,
+                                        get_world_group().local_rank,
+                                        backend,
+                                        group_name="mc2")
+        
     init_dit_group(dit_parallel_size, backend)
 
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+    
+    if hasattr(torch, 'npu') and torch.npu.is_available():
+        import vllm_ascend.distributed.parallel_state as vllm_ascend_parallel_state
+        if vllm_ascend_parallel_state._MC2:
+            vllm_ascend_parallel_state._MC2.destroy()
+        vllm_ascend_parallel_state._MC2 = None
+    
     global _DP
     if _DP:
         _DP.destroy()
@@ -796,6 +854,10 @@ def destroy_model_parallel():
         vllm_parallel_state._TP.destroy()
     vllm_parallel_state._TP = None
 
+    if vllm_parallel_state._EP:
+        vllm_parallel_state._EP.destroy()
+    vllm_parallel_state._EP = None
+
     global _PP
     if _PP:
         _PP.destroy()
@@ -807,6 +869,7 @@ def destroy_distributed_environment():
     if _WORLD:
         _WORLD.destroy()
     _WORLD = None
+    vllm_parallel_state._WORLD = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
