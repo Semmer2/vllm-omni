@@ -430,6 +430,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         message_list=None,
         device=None,
         max_new_tokens=None,
+        num_inference_steps=50,
         **kwargs,
     ):
         # 1. Sanity check
@@ -580,6 +581,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             past_key_values=None,
             custom_pos_emb=(cos, sin),
             mode=mode,
+            num_inference_steps=num_inference_steps,
             image_mask=to_device(output.gen_image_mask, device),
             gen_timestep_scatter_index=to_device(output.gen_timestep_scatter_index, device),
             cond_vae_images=to_device(cond_vae_images, device),
@@ -762,7 +764,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
                 results = self.pipeline(
                     batch_size=len(batch_gen_image_info),
                     image_size=[batch_gen_image_info[0].image_height, batch_gen_image_info[0].image_width],
-                    num_inference_steps=kwargs.get("diff_infer_steps", 50),
+                    num_inference_steps=kwargs.get("num_inference_steps", 50),
                     guidance_scale=kwargs.get("diff_guidance_scale", 5.0),
                     generator=generator,
                     model_kwargs=kwargs,
@@ -938,6 +940,8 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         image_size="auto",
         height: int | None = None,
         width: int | None = None,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 1.0,
         system_prompt: str | None = None,
         generator: torch.Generator | list[torch.Generator] | None = None,
         **kwargs,
@@ -947,12 +951,16 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
         height = req.sampling_params.height or height or self.default_sample_size * self.vae_scale_factor
         width = req.sampling_params.width or width or self.default_sample_size * self.vae_scale_factor
         image_size = (height, width)
+        num_inference_steps = req.sampling_params.num_inference_steps or num_inference_steps
+        if req.sampling_params.guidance_scale_provided:
+            guidance_scale = req.sampling_params.guidance_scale
         model_inputs = self.prepare_model_inputs(
             prompt=prompt,
             cot_text=None,
             system_prompt=system_prompt,
             mode="gen_image",
             generator=generator,
+            num_inference_steps=num_inference_steps,
             image_size=image_size,
         )
         outputs = self._generate(**model_inputs, **kwargs)
