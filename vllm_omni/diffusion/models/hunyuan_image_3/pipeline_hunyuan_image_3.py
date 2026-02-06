@@ -176,7 +176,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
             if hasattr(self, prefix.split(".")[0]):
                 module = dict(self.named_modules()).get(prefix)
                 if module:
-                    module.to(f"cuda:{tp_rank}")
+                    module.to(f"npu:{tp_rank}")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         self.pre_load()
