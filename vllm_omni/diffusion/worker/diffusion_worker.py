@@ -99,6 +99,7 @@ class DiffusionWorker:
             logger.info(f"Worker {self.rank}: Initialized device and distributed environment.")
 
             parallel_config = self.od_config.parallel_config
+            # add ep = dp*tp
             initialize_model_parallel(
                 data_parallel_size=parallel_config.data_parallel_size,
                 cfg_parallel_size=parallel_config.cfg_parallel_size,

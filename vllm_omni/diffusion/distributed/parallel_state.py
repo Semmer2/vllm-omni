@@ -193,6 +193,7 @@ class RankGenerator:
             "pp": self.pp,
             "cfg": self.cfg,
             "dp": self.dp,
+            "ep": self.dp * self.tp,
         }
         order = order.lower()
 
@@ -439,6 +440,7 @@ def model_parallel_is_initialized():
         and _SP is not None
         and _PP is not None
         and vllm_parallel_state._TP is not None
+        and vllm_parallel_state._EP is not None
     )
 
 
@@ -453,6 +455,7 @@ def init_model_parallel_group(
         "data",
         "pipeline",
         "tensor",
+        "expert",
         "sequence",
         "classifier_free_guidance",
     ], f"parallel_mode {parallel_mode} is not supported"
@@ -746,7 +749,7 @@ def initialize_model_parallel(
         pipeline_parallel_size,
         cfg_parallel_size,
         data_parallel_size,
-        "tp-sp-pp-cfg-dp",
+        "tp-sp-pp-cfg-dp-ep",
     )
     sp_group_ranks = rank_generator.get_ranks("sp")
     global _DP
@@ -802,6 +805,14 @@ def initialize_model_parallel(
         backend=backend,
         parallel_mode="tensor",
     )
+
+    assert vllm_parallel_state._EP is None, "Expert parallel group is already initialized"
+    vllm_parallel_state._EP = init_model_parallel_group(
+        group_ranks=rank_generator.get_ranks("tp-dp"),
+        local_rank=get_world_group().local_rank,
+        backend=backend,
+        parallel_mode="expert",
+    )
     if vae_parallel_size > 0:
         init_vae_group(dit_parallel_size, vae_parallel_size, backend)
     init_dit_group(dit_parallel_size, backend)
@@ -809,6 +820,7 @@ def initialize_model_parallel(
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+
     global _DP
     if _DP:
         _DP.destroy()
@@ -828,6 +840,10 @@ def destroy_model_parallel():
         vllm_parallel_state._TP.destroy()
     vllm_parallel_state._TP = None
 
+    if vllm_parallel_state._EP:
+        vllm_parallel_state._EP.destroy()
+    vllm_parallel_state._EP = None
+
     global _PP
     if _PP:
         _PP.destroy()
@@ -837,6 +853,8 @@ def destroy_model_parallel():
     if _VAE:
         _VAE.destroy()
     _VAE = None
+
+
 
 
 def destroy_distributed_environment():

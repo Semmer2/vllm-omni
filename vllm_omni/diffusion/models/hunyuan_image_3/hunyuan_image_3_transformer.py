@@ -2682,6 +2682,8 @@ class HunYuanSparseMoeBlock(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
+        #add ep
+        #self.ep_group = get_ep_group().device_group
         self.n_routed_experts = config.num_experts
 
         if self.tp_size > config.num_experts:
@@ -2913,36 +2915,25 @@ class HunYuanAttention(nn.Module):
         output = output.reshape(bsz, q_len, -1)
         return output, None, past_key_value
 
+import torch
+from vllm_ascend.ops.fused_moe.fused_moe import AscendSharedFusedMoE
+#from vllm.distributed.parallel_state import get_ep_group
 
-class HunyuanFusedMoE(SharedFusedMoE):
+class HunyuanFusedMoE(AscendSharedFusedMoE):
     def __init__(self, *, prefix: str = "", **kwargs):
-        super().__init__(prefix=prefix, **kwargs)
-        self._prefix = prefix
+            super().__init__(prefix=prefix, **kwargs)
+            self._prefix = prefix
 
-        self._init_hook_handle = self.register_forward_pre_hook(self._initialize_kernel_hook, with_kwargs=True)
+            self._init_hook_handle = self.register_forward_pre_hook(self._initialize_kernel_hook, with_kwargs=True)
 
     def _initialize_kernel_hook(self, module, args, kwargs):
         if self.quant_method:
             self.quant_method.process_weights_after_loading(self)
         self._init_hook_handle.remove()
 
+
     def forward(self, hidden_states, router_logits):
-        from vllm.model_executor.layers.fused_moe.layer import get_forward_context
-
-        ctx = get_forward_context()
-        if not ctx.remaining_moe_layers:
-            import re
-
-            moe_names = [name for name in ctx.no_compile_layers.keys() if ".mlp.experts" in name]
-
-            def get_layer_num(name):
-                match = re.search(r"layers\.(\d+)\.mlp", name)
-                return int(match.group(1)) if match else -1
-
-            moe_names.sort(key=get_layer_num, reverse=True)
-            ctx.remaining_moe_layers.extend(moe_names)
         return super().forward(hidden_states, router_logits)
-
 
 class HunyuanImage3DecoderLayer(nn.Module):
     def __init__(self, config: HunyuanImage3Config, layer_idx: int, prefix: str = ""):
