@@ -405,7 +405,7 @@ class HunyuanImage3Pipeline(HunyuanImage3PreTrainedModel, GenerationMixin):
     def vae_encode(self, image, cfg_factor=1):
         config = self.vae.config
 
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+        with torch.autocast(device_type="npu", dtype=torch.float16, enabled=True):
             vae_encode_result = self.vae.encode(image)
             if isinstance(vae_encode_result, torch.Tensor):
                 latents = vae_encode_result
