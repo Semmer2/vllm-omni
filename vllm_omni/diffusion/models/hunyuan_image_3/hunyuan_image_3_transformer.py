@@ -65,12 +65,13 @@ from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.layers.rope import RotaryEmbedding
 from vllm_omni.platforms import current_omni_platform
 
-if current_omni_platform.is_npu():
-    from vllm_omni.diffusion.models.hunyuan_image_3.hunyuan_fused_moe_npu import HunyuanFusedMoE
-elif current_omni_platform.is_cuda():
-    from vllm_omni.diffusion.models.hunyuan_image_3.hunyuan_fused_moe_cuda import HunyuanFusedMoE
-else:
-    raise NotImplementedError("Current_omni_platform is not implemented yet")
+from vllm_omni.diffusion.models.hunyuan_image_3.hunyuan_fused_moe import HunyuanFusedMoE
+# if current_omni_platform.is_npu():
+#     from vllm_omni.diffusion.models.hunyuan_image_3.hunyuan_fused_moe_npu import HunyuanFusedMoE
+# elif current_omni_platform.is_cuda():
+#     from vllm_omni.diffusion.models.hunyuan_image_3.hunyuan_fused_moe_cuda import HunyuanFusedMoE
+# else:
+#     raise NotImplementedError("Current_omni_platform is not implemented yet")
 
 logger = logging.getLogger(__name__)
 
