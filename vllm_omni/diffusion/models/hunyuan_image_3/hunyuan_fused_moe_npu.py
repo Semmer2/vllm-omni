@@ -43,26 +43,14 @@ class HunyuanFusedMoE(AscendSharedFusedMoE):
         else:
             self._moe_comm_type = MoECommType.ALLTOALL
         self._moe_comm_method = _MoECommMethods.get(self._moe_comm_type)
-
+        _vllm_fc.ForwardContext.moe_comm_type=self._moe_comm_type
+        _vllm_fc.ForwardContext.moe_comm_method=self._moe_comm_method
+        _vllm_fc.ForwardContext.flash_comm_v1_enabled=False
 
     def _initialize_kernel_hook(self, module, args, kwargs):
         if self.quant_method:
             self.quant_method.process_weights_after_loading(self)
         self._init_hook_handle.remove()
-
     def forward(self, hidden_states, router_logits):
-        from vllm.model_executor.layers.fused_moe.layer import get_forward_context
 
-        ctx = get_forward_context()
-        if not ctx.remaining_moe_layers:
-            import re
-
-            moe_names = [name for name in ctx.no_compile_layers.keys() if ".mlp.experts" in name]
-
-            def get_layer_num(name):
-                match = re.search(r"layers\.(\d+)\.mlp", name)
-                return int(match.group(1)) if match else -1
-
-            moe_names.sort(key=get_layer_num, reverse=True)
-            ctx.remaining_moe_layers.extend(moe_names)
         return super().forward(hidden_states, router_logits)
