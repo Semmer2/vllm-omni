@@ -3,8 +3,24 @@
 
 import logging
 from typing import Any, Optional
+import torch
+
+from vllm.config import VllmConfig
+from vllm.distributed import get_ep_group
+from vllm.distributed.parallel_state import (
+    init_model_parallel_group as vllm_init_model_parallel_group,
+)
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_world_size
+)
+import vllm.forward_context as _vllm_fc
 
 from vllm_omni.platforms import current_omni_platform
+from vllm_omni.diffusion.forward_context import get_forward_context as omni_get_ctx
+from vllm_omni.diffusion.distributed.parallel_state import (
+    get_data_parallel_world_size,
+    get_world_group,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,23 +64,55 @@ def _get_cuda_impl_class() -> type:
 
     return HunyuanFusedMoECuda
 
+def _init_mc2_group_for_diffusion_npu(
+    world_size: int,
+    data_parallel_size: int,
+    tensor_parallel_size: int,
+    backend: str,
+    local_rank: int,
+) -> None:
+    import vllm_ascend.distributed.parallel_state as vllm_ascend_parallel_state
+
+    if getattr(vllm_ascend_parallel_state, "_MC2", None) is not None:
+        return
+    all_ranks = torch.arange(world_size).reshape(
+        -1, data_parallel_size * tensor_parallel_size
+    )
+    group_ranks = all_ranks.unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+
+    vllm_ascend_parallel_state._MC2 = vllm_init_model_parallel_group(
+        group_ranks,
+        local_rank,
+        backend,
+        group_name="mc2",
+    )
+
 
 def _get_npu_impl_class() -> type:
-    import torch
-    import vllm.forward_context as _vllm_fc
     from vllm_ascend.ops.fused_moe.fused_moe import AscendSharedFusedMoE
     from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
     from vllm_ascend.ascend_forward_context import MoECommType
     from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-    from vllm.config import VllmConfig
-    from vllm.distributed import get_ep_group
-    from vllm_omni.diffusion.forward_context import get_forward_context as omni_get_ctx
+
+    # Workaround for vllm-ascend: mc2_group must be initialized to prevent errors, despite being unused in FusedMoE communication.
+    world_size = torch.distributed.get_world_size()
+    data_parallel_size = get_data_parallel_world_size()
+    tensor_parallel_size = get_tensor_model_parallel_world_size()
+    backend = torch.distributed.get_backend(get_world_group().device_group)
+    local_rank = get_world_group().local_rank
+    _init_mc2_group_for_diffusion_npu(
+        world_size=world_size,
+        data_parallel_size=data_parallel_size,
+        tensor_parallel_size=tensor_parallel_size,
+        backend=backend,
+        local_rank=local_rank,
+    )
 
 
-    if hasattr(torch, "npu") and torch.npu.is_available():
-        if not hasattr(_vllm_fc.ForwardContext, "moe_comm_method"):
-            _vllm_fc.ForwardContext.__annotations__["in_profile_run"] = bool
-            _vllm_fc.ForwardContext.in_profile_run = False
+    if not hasattr(_vllm_fc.ForwardContext, "moe_comm_method"):
+        _vllm_fc.ForwardContext.__annotations__["in_profile_run"] = bool
+        _vllm_fc.ForwardContext.in_profile_run = False
 
     def select_moe_comm_method(vllm_config: VllmConfig) -> MoECommType | None:
         soc_version = get_ascend_device_type()

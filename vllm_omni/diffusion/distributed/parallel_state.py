@@ -852,17 +852,6 @@ def initialize_model_parallel(
             )
         else:
             raise RuntimeError("Expert parallelism enabled for a non-MoE model ")
-    if hasattr(torch, 'npu') and torch.npu.is_available():
-        all_ranks = torch.arange(world_size).reshape(
-        -1, data_parallel_size * tensor_parallel_size)
-        group_ranks = all_ranks.unbind(0)
-        group_ranks = [x.tolist() for x in group_ranks]
-        import vllm_ascend.distributed.parallel_state as vllm_ascend_parallel_state
-        from vllm.distributed.parallel_state import init_model_parallel_group as vllm_init_model_parallel_group
-        vllm_ascend_parallel_state._MC2 =  vllm_init_model_parallel_group(group_ranks,
-                                        get_world_group().local_rank,
-                                        backend,
-                                        group_name="mc2")
     init_dit_group(dit_parallel_size, backend)
 
 
