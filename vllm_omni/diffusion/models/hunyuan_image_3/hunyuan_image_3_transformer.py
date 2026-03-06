@@ -32,10 +32,8 @@ from transformers.modeling_utils import PreTrainedModel
 from vllm.config import CacheConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -1564,6 +1562,7 @@ class HunYuanAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         output = output.reshape(bsz, q_len, -1)
         return output, None, past_key_value
+
 
 class HunyuanImage3DecoderLayer(nn.Module):
     def __init__(self, config: HunyuanImage3Config, layer_idx: int, prefix: str = ""):
