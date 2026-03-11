@@ -54,16 +54,12 @@ def _get_impl_class() -> type:
         return _impl_class
     if current_omni_platform.is_npu():
         _impl_class = _get_npu_impl_class()
-    elif current_omni_platform.is_cuda():
-        _impl_class = _get_cuda_impl_class()
     else:
-        raise NotImplementedError(
-            f"HunyuanFusedMoE is not implemented for current_omni_platform: {current_omni_platform!r}"
-        )
+        _impl_class = _get_impl_class()
     return _impl_class
 
 
-def _get_cuda_impl_class() -> type:
+def _get_impl_class() -> type:
     from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 
     class HunyuanFusedMoECuda(SharedFusedMoE):
