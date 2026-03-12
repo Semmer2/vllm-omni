@@ -23,7 +23,7 @@ from vllm_omni.diffusion.distributed.parallel_state import (
 from vllm_omni.diffusion.forward_context import get_forward_context as omni_get_ctx
 
 
-def _init_mc2_group_for_diffusion_npu(
+def _init_mc2_group_for_diffusion(
     world_size: int,
     data_parallel_size: int,
     tensor_parallel_size: int,
@@ -69,7 +69,7 @@ def prepare_hunyuan_fused_moe_runtime() -> None:
     tensor_parallel_size = get_tensor_model_parallel_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
     local_rank = get_world_group().local_rank
-    _init_mc2_group_for_diffusion_npu(
+    _init_mc2_group_for_diffusion(
         world_size=world_size,
         data_parallel_size=data_parallel_size,
         tensor_parallel_size=tensor_parallel_size,
@@ -86,7 +86,7 @@ def prepare_hunyuan_fused_moe_runtime() -> None:
     _vllm_fc.ForwardContext.flash_comm_v1_enabled = False
 
 
-class HunyuanFusedMoENPU(AscendSharedFusedMoE):
+class AscendHunyuanFusedMoE(AscendSharedFusedMoE):
     def __init__(self, *, prefix: str = "", **kwargs: Any) -> None:
         super().__init__(prefix=prefix, **kwargs)
         self._prefix = prefix

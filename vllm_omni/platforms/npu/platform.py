@@ -38,7 +38,7 @@ class NPUOmniPlatform(OmniPlatform, NPUPlatform):
     @classmethod
     def get_diffusion_model_impl_qualname(cls, op_name: str) -> str:
         if op_name == "hunyuan_fused_moe":
-            return "vllm_omni.platforms.npu.models.hunyuan_fused_moe.HunyuanFusedMoENPU"
+            return "vllm_omni.platforms.npu.models.hunyuan_fused_moe.AscendHunyuanFusedMoE"
         return super().get_diffusion_model_impl_qualname(op_name)
 
     @classmethod
