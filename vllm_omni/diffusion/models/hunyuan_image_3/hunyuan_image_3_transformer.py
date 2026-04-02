@@ -1890,6 +1890,7 @@ class HunyuanImagePostprocessor(nn.Module):
 
 
 class HunyuanImage3Model(nn.Module):
+    _repeated_blocks = ["HunYuanSparseMoeBlock", "HunYuanMLP"]
     _sp_plan = {
         # Split custom_pos_emb tuple elements (cos, sin) at model forward input
         "pre_processor": {
