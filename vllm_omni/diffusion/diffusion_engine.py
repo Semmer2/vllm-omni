@@ -31,7 +31,7 @@ from vllm_omni.diffusion.registry import (
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.diffusion.sched import RequestScheduler, SchedulerInterface, StepScheduler
 from vllm_omni.diffusion.sched.interface import DiffusionRequestStatus
-from vllm_omni.diffusion.worker.utils import RunnerOutput
+from vllm_omni.diffusion.worker.utils import BatchRunnerOutput, RunnerOutput
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 from vllm_omni.outputs import OmniRequestOutput
 
@@ -113,7 +113,6 @@ class DiffusionEngine:
             raise e
 
     async def _check_and_start_background_loop(self):
-
         if self._loop_started:
             return
 
@@ -362,16 +361,23 @@ class DiffusionEngine:
             if sched_output.is_empty:
                 self._handle_finished_requests(sched_output.finished_req_ids, None)
                 continue
-            sched_req_id = sched_output.scheduled_req_ids[0]
+
             try:
                 runner_output = self.execute_fn(sched_output)
             except Exception as exc:
-                logger.error("Execution failed for diffusion requests %s", sched_output.scheduled_req_ids, exc_info=True)
-                runner_output = RunnerOutput(
-                    req_id=sched_req_id,
-                    step_index=None,
-                    finished=True,
-                    result=DiffusionOutput(error=str(exc)),
+                logger.error(
+                    "Execution failed for diffusion requests %s", sched_output.scheduled_req_ids, exc_info=True
+                )
+                runner_output = BatchRunnerOutput.from_list(
+                    [
+                        RunnerOutput(
+                            req_id=req_id,
+                            step_index=None,
+                            finished=True,
+                            result=DiffusionOutput(error=str(exc)),
+                        )
+                        for req_id in sched_output.scheduled_req_ids
+                    ]
                 )
 
             self._process_aborts_queue()
@@ -380,14 +386,18 @@ class DiffusionEngine:
 
     def _handle_finished_requests(
         self,
-        finished_ids: str,
+        finished_ids: set[str],
         runner_output: RunnerOutput | None = None,
         missing_result_error: str = "Diffusion execution finished without a final output",
     ):
         for rid in finished_ids:
             if rid in self._out_queue:
                 fut = self._out_queue.pop(rid)
-                out = self._finalize_finished_request(rid, runner_output, missing_result_error)
+                if runner_output is not None:
+                    _output = runner_output.get_req_output(rid)
+                else:
+                    _output = None
+                out = self._finalize_finished_request(rid, _output, missing_result_error)
                 if not fut.done():
                     self.main_loop.call_soon_threadsafe(fut.set_result, out)
 
@@ -464,7 +474,12 @@ class DiffusionEngine:
                 self._process_aborts_queue()
 
                 finished_req_ids = self.scheduler.update_from_output(sched_output, runner_output)
+
+                # sync func should receive one result
+                if not isinstance(runner_output, RunnerOutput) and not len(runner_output) == 1:
+                    raise ValueError("Sync func should receive one result at one time")
                 if target_sched_req_id in finished_req_ids:
+                    runner_output = runner_output.get_req_output(target_sched_req_id)
                     return self._finalize_finished_request(
                         target_sched_req_id,
                         runner_output=runner_output,
