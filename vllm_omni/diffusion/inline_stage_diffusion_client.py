@@ -107,8 +107,7 @@ class InlineStageDiffusionClient:
                 kv_sender_info=kv_sender_info,
             )
 
-            loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(self._executor, self._engine.step, request)
+            results = await self._engine.step(request)
             result = results[0]
             if not result.request_id:
                 result.request_id = request_id
@@ -160,8 +159,7 @@ class InlineStageDiffusionClient:
                 kv_sender_info=kv_sender_info,
             )
 
-            loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(self._executor, self._engine.step, request)
+            results = await self._engine.step(request)
 
             all_images: list = []
             merged_mm: dict[str, Any] = {}

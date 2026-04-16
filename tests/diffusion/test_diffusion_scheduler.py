@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import queue
 import threading
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from vllm_omni.diffusion.sched import (
     StepScheduler,
 )
 from vllm_omni.diffusion.sched.interface import CachedRequestData, NewRequestData
+from vllm_omni.diffusion.worker.utils import RunnerOutput
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu, pytest.mark.diffusion]
@@ -34,7 +36,7 @@ def _make_request(req_id: str) -> OmniDiffusionRequest:
 
 
 def _make_request_output(req_id: str, *, error: str | None = None, finished: bool = True):
-    return SimpleNamespace(
+    return RunnerOutput(
         req_id=req_id,
         step_index=None,
         finished=finished,
@@ -49,7 +51,7 @@ def _make_step_output(
     finished: bool = False,
     error: str | None = None,
 ):
-    return SimpleNamespace(
+    return RunnerOutput(
         req_id=req_id,
         step_index=step_index,
         finished=finished,
@@ -348,18 +350,25 @@ class TestDiffusionEngine:
         assert req_id in finished
         assert scheduler.get_request_state(req_id).status == DiffusionRequestStatus.FINISHED_COMPLETED
 
-    def test_step_raises_aborted_error(self, mocker: MockerFixture) -> None:
+    @pytest.mark.asyncio
+    async def test_step_raises_aborted_error(self, mocker: MockerFixture) -> None:
         engine = DiffusionEngine.__new__(DiffusionEngine)
+        engine._loop_started = False
+        engine._init_lock = asyncio.Lock()
+        engine.main_loop = asyncio.get_running_loop()
+        engine.stop_event = threading.Event()
         engine.pre_process_func = None
-        engine.add_req_and_wait_for_response = mocker.Mock(
+        engine.async_add_req_and_wait_for_response = mocker.AsyncMock(
             return_value=DiffusionOutput(aborted=True, abort_message="Request req-abort aborted.")
         )
 
         with pytest.raises(DiffusionRequestAbortedError, match="Request req-abort aborted"):
-            engine.step(_make_request("req-abort"))
+            await engine.step(_make_request("req-abort"))
 
     def test_abort_queue_marks_request_finished_aborted(self) -> None:
         engine = DiffusionEngine.__new__(DiffusionEngine)
+        engine._rpc_lock = threading.RLock()
+        engine._cv = threading.Condition(engine._rpc_lock)
         engine.scheduler = RequestScheduler()
         engine.scheduler.initialize(SimpleNamespace())
         engine.abort_queue = queue.Queue()
@@ -519,7 +528,7 @@ class TestStepScheduler:
         sched_output = self.scheduler.schedule()
         finished = self.scheduler.update_from_output(
             sched_output,
-            SimpleNamespace(
+            RunnerOutput(
                 req_id=req_id,
                 step_index=None,
                 finished=True,
