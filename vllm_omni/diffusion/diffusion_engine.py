@@ -95,6 +95,10 @@ class DiffusionEngine:
             StepScheduler() if self.step_execution else RequestScheduler()
         )
         self.scheduler.initialize(od_config)
+        if self.scheduler.max_num_running_reqs > 1 and not self.step_execution:
+            max_num_seqs = self.scheduler.max_num_running_reqs
+            self.scheduler.max_num_running_reqs = 1
+            logger.warning(f"Non-stepwise-execution does not support max-num-seqs={max_num_seqs}, set it to 1.")
         self.main_loop: asyncio.AbstractEventLoop | None = None
         self.stop_event: threading.Event | None = None
         self._loop_started = False

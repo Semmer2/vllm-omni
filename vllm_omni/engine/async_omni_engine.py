@@ -1322,7 +1322,7 @@ class AsyncOmniEngine:
         devices = ",".join(str(i) for i in range(num_devices))
 
         stage_engine_args = {
-            "max_num_seqs": 1,
+            "max_num_seqs": kwargs.get("max_num_seqs") or 1,
             "parallel_config": parallel_config,
             "model_class_name": kwargs.get("model_class_name", None),
             "step_execution": kwargs.get("step_execution", False),
