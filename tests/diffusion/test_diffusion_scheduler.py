@@ -93,6 +93,7 @@ class _StubScheduler(SchedulerInterface):
         self._sched_req_id = request.request_ids[0]
         self._state = None
         self._scheduled = False
+        self.max_num_running_reqs = 1
 
     def initialize(self, od_config) -> None:
         self.initialized_with = od_config
