@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, override_forward_context
+from vllm.inputs import tokens_input
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -121,7 +122,9 @@ def build_voxcpm2_prompt(
         else:
             additional["reference_audio"] = [[ref_audio, ref_sr]]
             prefill_len += ref_len + 2  # ref_start / ref_end
-    return {"prompt_token_ids": [1] * prefill_len, "additional_information": additional}
+    prompt = tokens_input(prompt_token_ids=[1] * prefill_len)
+    prompt["additional_information"] = additional
+    return prompt
 
 
 def _encode_raw_audio(
@@ -175,8 +178,6 @@ class _RequestState:
     # Rolling tail of previously-decoded latents used as VAE receptive-field context.
     # Shape (n_pad_frames, feat_dim) on GPU. None before first decode.
     decode_pad: torch.Tensor | None = None
-    # Audio chunks already emitted (CPU float32), concatenated for cumulative output.
-    audio_chunks: list[torch.Tensor] = dataclasses.field(default_factory=list)
     decode_step_count: int = 0
     request_start_time: float = 0.0
     prefill_completed: bool = False
@@ -184,7 +185,6 @@ class _RequestState:
     prompt_cache: dict | None = None
     prefill_masks: tuple | None = None
     is_stopping: bool = False
-    last_decoded_audio: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -1034,8 +1034,6 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         all_latents = vae_input  # [pad + new]
         state.decode_pad = all_latents[-self._n_decode_pad_frames :].detach()
 
-        state.audio_chunks.append(new_audio)
-        state.last_decoded_audio = new_audio
         self._perf.stop("vae_decode")
         return new_audio
 
@@ -1146,7 +1144,6 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
             state = self._get_or_create_state(req_id)
             state.prefill_text = ""
             state.decode_pad = None
-            state.audio_chunks = []
             state.prefill_completed = False
             state.decode_step_count = 0
             state.precomputed_stop_logits = None
@@ -1155,7 +1152,6 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
             state.prev_feat_embed = None
             state.curr_prefix_feat_cond = None
             state.is_stopping = False
-            state.last_decoded_audio = None
 
             # Voice clone / continuation
             ref_audio = info_dict.get("reference_audio") or info_dict.get("ref_audio")
